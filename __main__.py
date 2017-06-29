@@ -1784,6 +1784,9 @@ class Lyse(object):
         self.ui.splitter_vertical.setSizes([300, 600])
         self.ui.show()
         # self.ui.showMaximized()
+        
+        self.ui.actionLoad_configuration.triggered.connect(self.load_configuration)
+        self.ui.actionSave_configuration.triggered.connect(self.save_configuration)
 
     def setup_config(self):
         config_path = os.path.join(config_prefix, '%s.ini' % socket.gethostname())
@@ -1798,6 +1801,32 @@ class Lyse(object):
                                   "ports": ["lyse"]
                                   }
         self.exp_config = LabConfig(config_path, required_config_params)
+
+    def save_configuration(self):
+        import pprint
+        save_file = os.path.join(os.path.dirname(os.path.realpath(__file__)),"config.ini")
+        lyse_config = LabConfig(save_file)
+        save_data = {}
+        save_data['SingleShot'] = [routine.filepath for routine in self.singleshot_routinebox.routines]
+        save_data['LastSingleShotFolder'] = self.singleshot_routinebox.last_opened_routine_folder
+        save_data['MultiShot'] = [routine.filepath for routine in self.multishot_routinebox.routines]
+        save_data['LastMultiShotFolder'] = self.multishot_routinebox.last_opened_routine_folder
+        save_data['LastFileBoxFolder'] = self.filebox.last_opened_shots_folder
+        for key, value in save_data.items():
+            lyse_config.set('lyse_state', key, pprint.pformat(value))
+
+    def load_configuration(self):
+        import ast
+        save_file = os.path.join(os.path.dirname(os.path.realpath(__file__)),"config.ini")
+        lyse_config = LabConfig(save_file)
+        try:
+            self.singleshot_routinebox.add_rotines(ast.literal_eval(lyse_config.get('lyse_state', 'SingleShot')))
+            self.singleshot_routinebox.last_opened_routine_folder = ast.literal_eval(lyse_config.get('lyse_state', 'LastSingleShotFolder'))
+            self.multishot_routinebox.add_rotines(ast.literal_eval(lyse_config.get('lyse_state', 'MultiShot')))
+            self.multishot_routinebox.last_opened_routine_folder = ast.literal_eval(lyse_config.get('lyse_state', 'LastMultiShotFolder'))
+            self.filebox.last_opened_shots_folder = ast.literal_eval(lyse_config.get('lyse_state', 'LastFileBoxFolder'))
+        except:
+            pass
 
     def connect_signals(self):
         if os.name == 'nt':
