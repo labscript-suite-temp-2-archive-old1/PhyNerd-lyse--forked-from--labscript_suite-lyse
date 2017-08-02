@@ -1735,8 +1735,10 @@ class FileBox(object):
         self.to_multishot.put(None)
         while True:
             signal, _, updated_data = self.from_multishot.get()
-            for file in updated_data:
-                self.shots_model.update_row(file, updated_row_data=updated_data[file])
+            indices = np.where(np.in1d(self.shots_model.dataframe['filepath'].values, updated_data.keys(), assume_unique=True))[0]
+            for index in indices:
+                file = self.shots_model.dataframe.loc[index, ('filepath','')]
+                self.shots_model.update_row(updated_row_data=updated_data[file], df_row_index=index)
             if signal == 'done':
                 self.multishot_required = False
                 return
