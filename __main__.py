@@ -1095,6 +1095,7 @@ class DataFrameModel(QtCore.QObject):
         self._view = view
         self.exp_config = exp_config
         self._model = UneditableModel()
+        self.rows_dict = {}
 
         headerview_style = """
                            QHeaderView {
@@ -1160,13 +1161,10 @@ class DataFrameModel(QtCore.QObject):
         self.action_remove_selected.triggered.connect(self.on_remove_selection)
 
     def get_model_row_by_filepath(self, filepath):
-        filepath_colname = ('filepath',) + ('',) * (self.nlevels - 1)
-        possible_items = self._model.findItems(filepath, column=self.column_indices[filepath_colname])
-        if len(possible_items) > 1:
-            raise LookupError('Multiple items found')
-        elif not possible_items:
+        try:
+            item = self.rows_dict[filepath]
+        except KeyError:
             raise LookupError('No item found')
-        item = possible_items[0]
         index = item.index()
         return index.row()
 
@@ -1405,6 +1403,7 @@ class DataFrameModel(QtCore.QObject):
         status_item.setData(0, self.ROLE_STATUS_PERCENT)
         status_item.setIcon(QtGui.QIcon(':qtutils/fugue/tick'))
         name_item = QtGui.QStandardItem(filepath)
+        self.rows_dict[filepath] = name_item
         return [status_item, name_item]
 
     def renumber_rows(self):
