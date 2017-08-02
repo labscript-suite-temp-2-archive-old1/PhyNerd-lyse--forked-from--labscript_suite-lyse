@@ -1284,19 +1284,25 @@ class DataFrameModel(QtCore.QObject):
         app.output_box.output('Warning: Shot deleted from disk or no longer readable %s\n' % filepath, red=True)
 
     @inmain_decorator()
-    def update_row(self, filepath, dataframe_already_updated=False, status_percent=None, new_row_data=None, updated_row_data=None):
+    def update_row(self, filepath, dataframe_already_updated=False, status_percent=None, new_row_data=None, updated_row_data=None, df_row_index=None):
         """"Updates a row in the dataframe and Qt model
         to the data in the HDF5 file for that shot. Also sets the percent done, if specified"""
         # Update the row in the dataframe first:
         if (new_row_data is None) == (updated_row_data is None) and not dataframe_already_updated:
             raise ValueError('Exactly one of new_row_data or updated_row_data must be provided')
 
-        df_row_index = np.where(self.dataframe['filepath'].values == filepath)
-        try:
-            df_row_index = df_row_index[0][0]
-        except IndexError:
-            # Row has been deleted, nothing to do here:
-            return
+        if df_row_index is None:
+            df_row_index = np.where(self.dataframe['filepath'].values == filepath)
+            try:
+                df_row_index = df_row_index[0][0]
+            except IndexError:
+                # Row has been deleted, nothing to do here:
+                return
+        else:
+            # If df_row_index was used, check the row actually matches the filepath.
+            # This might be the case if the caller was not in the main thread, which
+            # is a situation vulnerable to race conditions:
+            assert filepath == self.dataframe.loc[df_row_index, ('filepath', '')]
 
         if updated_row_data is not None and not dataframe_already_updated:
             for group, name in updated_row_data:
@@ -1367,12 +1373,6 @@ class DataFrameModel(QtCore.QObject):
                 continue
             if updated_row_data is not None and column_name not in updated_row_data:
                 continue
-            item = self._model.item(model_row_number, column_number)
-            if item is None:
-                # This is the first time we've written a value to this part of the model:
-                item = QtGui.QStandardItem('NaN')
-                item.setData(QtCore.Qt.AlignCenter, QtCore.Qt.TextAlignmentRole)
-                self._model.setItem(model_row_number, column_number, item)
             value = dataframe_row[column_name]
             if isinstance(value, float):
                 value_str = scientific_notation(value)
@@ -1383,7 +1383,15 @@ class DataFrameModel(QtCore.QObject):
                 short_value_str = lines[0] + ' ...'
             else:
                 short_value_str = value_str
-            item.setText(short_value_str)
+
+            item = self._model.item(model_row_number, column_number)
+            if item is None:
+                # This is the first time we've written a value to this part of the model:
+                item = QtGui.QStandardItem(short_value_str)
+                item.setData(QtCore.Qt.AlignCenter, QtCore.Qt.TextAlignmentRole)
+                self._model.setItem(model_row_number, column_number, item)
+            else:
+                item.setText(short_value_str)
             item.setToolTip(repr(value))
 
         for i, column_name in enumerate(sorted(new_column_names)):
@@ -1424,35 +1432,26 @@ class DataFrameModel(QtCore.QObject):
     def add_files(self, filepaths, new_row_data):
         """Add files to the dataframe model. New_row_data should be a
         dataframe containing the new rows."""
+        duplicates = set(self.dataframe['filepath'].values)-(set(self.dataframe['filepath'].values)-set(filepaths))
+        for filepath in duplicates:
+            app.output_box.output('Warning: Ignoring duplicate shot %s\n' % filepath, red=True)
+            if new_row_data is not None:
+                df_row_index = np.where(new_row_data['filepath'].values == filepath)
+                new_row_data = new_row_data.drop(df_row_index[0])
+                new_row_data.index = pandas.Index(range(len(new_row_data)))
 
-        to_add = []
-
-        # Check for duplicates:
-        for filepath in filepaths:
-            if filepath in self.dataframe['filepath'].values or filepath in to_add:
-                app.output_box.output('Warning: Ignoring duplicate shot %s\n' % filepath, red=True)
-                if new_row_data is not None:
-                    df_row_index = np.where(new_row_data['filepath'].values == filepath)
-                    new_row_data = new_row_data.drop(df_row_index[0])
-                    new_row_data.index = pandas.Index(range(len(new_row_data)))
-            else:
-                to_add.append(filepath)
-
-        assert len(new_row_data) == len(to_add)
-
-        for filepath in to_add:
+        df_len = len(self.dataframe)
+        self.dataframe = concat_with_padding(self.dataframe, new_row_data)
+        self.update_column_levels()
+        filepaths = new_row_data["filepath"].tolist()
+        for i, filepath in enumerate(filepaths):
             # Add the new rows to the model:
             self._model.appendRow(self.new_row(filepath))
             vert_header_item = QtGui.QStandardItem('...loading...')
             self._model.setVerticalHeaderItem(self._model.rowCount() - 1, vert_header_item)
             self._view.resizeRowToContents(self._model.rowCount() - 1)
-
-        if to_add:
-            self.dataframe = concat_with_padding(self.dataframe, new_row_data)
-            self.update_column_levels()
-            for filepath in to_add:
-                self.update_row(filepath, dataframe_already_updated=True)
-            self.renumber_rows()
+            self.update_row(filepath, dataframe_already_updated=True, df_row_index=i+df_len)
+        self.renumber_rows()
 
     @inmain_decorator()
     def get_first_incomplete(self):
