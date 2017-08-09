@@ -162,6 +162,9 @@ def scientific_notation(x, sigfigs=4, mode='eng'):
 
 
 class WebServer(ZMQServer):
+    def __init__(self, *args, **kwargs):
+        super(WebServer, self).__init__(*args, **kwargs)
+        self.storage = {}
 
     def handler(self, request_data):
         logger.info('WebServer request: %s' % str(request_data))
@@ -185,8 +188,41 @@ class WebServer(ZMQServer):
                     raise AssertionError(str(type(h5_filepath)) + ' is not str or unicode')
                 app.filebox.incoming_queue.put(h5_filepath)
                 return 'added successfully'
+        elif isinstance(request_data, tuple):
+            command, keys, data = request_data
+
+            storage = self.storage
+            if len(keys) > 1:
+                for key in keys[:-1]:
+                    if key not in storage:
+                        storage[key] = {}
+                    storage = storage[key]
+
+            if command == "get":
+                try:
+                    return storage[keys[-1]]
+                except KeyError:
+                    return None
+                except IndexError:
+                    return storage
+
+            elif command == "set":
+                storage[keys[-1]] = data
+                return True
+
+            elif command == "del":
+                try:
+                    del storage[keys[-1]]
+                except KeyError and IndexError:
+                    return False
+                return True
+
+            # elif command == "clear":
+            #     del self.storage
+            #     self.storage = {}
+
         return ("error: operation not supported. Recognised requests are:\n "
-                "'get dataframe'\n 'hello'\n {'filepath': <some_h5_filepath>}")
+                "'get dataframe'\n 'hello'\n {'filepath': <some_h5_filepath>} \n (<get/set/del/clear>, <tuple_of_storage_keys>, <data_to_store>)")
 
 
 class LyseMainWindow(QtGui.QMainWindow):

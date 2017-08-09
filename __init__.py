@@ -64,12 +64,15 @@ class _RoutineStorage(object):
 
 routine_storage = _RoutineStorage()
 
+# enable caching for images and sequence Run objects
+caching_enabled = True
+
+port = 42519
 
 def data(filepath=None, host='localhost', timeout=5):
     if filepath is not None:
         return _get_singleshot(filepath)
     else:
-        port = 42519
         df = zmq_get(port, host, 'get dataframe', timeout)
         try:
             padding = ('',)*(df.columns.nlevels - 1)
@@ -114,6 +117,10 @@ class Run(object):
             # 'the moment.\n')
             self.no_write = True
             
+        if cache:
+            zmq_get(port, 'localhost', ('set', ['runs', h5_path], self), 5)
+
+
     def set_group(self, groupname):
         self.group = groupname
         with h5py.File(self.h5_path) as h5_file:
@@ -228,7 +235,12 @@ class Run(object):
         for name, value in zip(names, values):
             self.save_result_array(name, value)
     
-    def get_image(self,orientation,label,image):
+    def get_image(self,orientation,label,image,timeout=5):
+        if caching_enabled:
+            img = zmq_get(port, 'localhost', ('get', ['images', orientation, label, image, self.h5_path], None), timeout)
+            if img is not None:
+                return img
+
         with h5py.File(self.h5_path) as h5_file:
             if not 'images' in h5_file:
                 raise Exception('File does not contain any images')
@@ -238,8 +250,11 @@ class Run(object):
                 raise Exception('File does not contain any images with label \'%s\''%label)
             if not image in h5_file['images'][orientation][label]:
                 raise Exception('Image \'%s\' not found in file'%image)
-            return array(h5_file['images'][orientation][label][image])
-    
+            img = array(h5_file['images'][orientation][label][image])
+            if caching_enabled:
+                zmq_get(port, 'localhost', ('set', ['images', orientation, label, image, self.h5_path], img), timeout)
+            return img
+
     def get_images(self,orientation,label, *images):
         results = []
         for image in images:
@@ -350,9 +365,23 @@ class Sequence(Run):
         with h5py.File(h5_path) as h5_file:
             if not 'results' in h5_file:
                  h5_file.create_group('results')
-                 
-        self.runs = {path: Run(path,no_write=True) for path in run_paths}
-        
+
+        if caching_enabled:
+            cached_runs = zmq_get(port, 'localhost', ('get', ['runs'], None), 5)
+        else:
+            cached_runs = None
+
+        if cached_runs is not None:
+            too_many = set(cached_runs.keys()) - set(run_paths)
+            for filepath in too_many:
+                del cached_runs[filepath]
+            missing = set(run_paths) - set(cached_runs.keys())
+            for filepath in missing:
+                cached_runs[filepath] = Run(path, no_write=True, cache=caching_enabled)
+            self.runs = cached_runs
+        else:
+            self.runs = {path: Run(path, no_write=True, cache=caching_enabled) for path in run_paths}
+
         # The group were the results will be stored in the h5 file will
         # be the name of the python script which is instantiating this
         # Sequence object:
@@ -387,6 +416,30 @@ class Sequence(Run):
     def get_image(self,*args):
         raise NotImplementedError('If you want to use this feature please ask me to implement it! -Chris')     
 
+    def get_image(self, *args):
+        cached_images = zmq_get(port, 'localhost', ('get', ['images'] + list(args), None), 5)
+        if cached_images is not None:
+            too_many = set(cached_images.keys()) - set(self.runs.keys())
+            for filepath in too_many:
+                del cached_images[filepath]
+            missing = set(self.runs.keys()) - set(cached_images.keys())
+        else:
+            cached_images = {}
+            missing = self.runs.keys()
+
+        for filepath in missing:
+            cached_images[filepath] = self.runs[filepath].get_image(*args)
+
+        return cached_images
+
+def save_value(key, value):
+    zmq_get(port, 'localhost', ('set', ['cross_routine'].append(key), value), 5)
+
+def get_saved_value(key):
+    return zmq_get(port, 'localhost', ('set', ['cross_routine'].append(key), None), 5)
+
+def remove_saved_value(key):
+    return zmq_get(port, 'localhost', ('del', ['cross_routine'].append(key), None), 5)
 
 def figure_to_clipboard(figure=None, **kwargs):
     """Copy a matplotlib figure to the clipboard as a png. If figure is None,
