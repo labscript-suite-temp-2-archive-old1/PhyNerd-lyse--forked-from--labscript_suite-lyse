@@ -166,6 +166,19 @@ class WebServer(ZMQServer):
         super(WebServer, self).__init__(*args, **kwargs)
         self.storage = {}
 
+    def remove_data_by_filepath(self, filepath, dic=None):
+        if dic is None:
+            dic = self.storage
+
+        # find top level keys
+        if filepath in dic:
+            del dic[filepath]
+
+        # recursivly search the rest
+        for k in dic.keys():
+            if isinstance(dic[k], dict):
+                self.remove_data_by_filepath(filepath, dic[k])
+
     def handler(self, request_data):
         logger.info('WebServer request: %s' % str(request_data))
         if request_data == 'hello':
@@ -1223,6 +1236,7 @@ class DataFrameModel(QtCore.QObject):
         # Delete one at a time from Qt model:
         for name_item in selected_name_items:
             row = name_item.row()
+            server.remove_data_by_filepath(self._model.item(row, self.COL_FILEPATH).text())
             self._model.removeRow(row)
         self.renumber_rows()
 

@@ -436,7 +436,7 @@ def save_value(key, value):
     zmq_get(port, 'localhost', ('set', ['cross_routine'].append(key), value), 5)
 
 def get_saved_value(key):
-    return zmq_get(port, 'localhost', ('set', ['cross_routine'].append(key), None), 5)
+    return zmq_get(port, 'localhost', ('get', ['cross_routine'].append(key), None), 5)
 
 def remove_saved_value(key):
     return zmq_get(port, 'localhost', ('del', ['cross_routine'].append(key), None), 5)
