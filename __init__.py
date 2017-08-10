@@ -66,6 +66,7 @@ routine_storage = _RoutineStorage()
 
 # enable caching for images and sequence Run objects
 caching_enabled = True
+storage_timeout = 1
 
 port = 42519
 
@@ -116,9 +117,9 @@ class Run(object):
             # 'mode, there is no scipt name. Opening in read only mode for '
             # 'the moment.\n')
             self.no_write = True
-            
-        if cache:
-            zmq_get(port, 'localhost', ('set', ['runs', h5_path], self), 5)
+
+        if caching_enabled:
+            zmq_get(port, 'localhost', ('set', ['runs', h5_path], self), storage_timeout)
 
 
     def set_group(self, groupname):
@@ -235,9 +236,9 @@ class Run(object):
         for name, value in zip(names, values):
             self.save_result_array(name, value)
     
-    def get_image(self,orientation,label,image,timeout=5):
+    def get_image(self,orientation,label,image):
         if caching_enabled:
-            img = zmq_get(port, 'localhost', ('get', ['images', orientation, label, image, self.h5_path], None), timeout)
+            img = zmq_get(port, 'localhost', ('get', ['images', orientation, label, image, self.h5_path], None), storage_timeout)
             if img is not None:
                 return img
 
@@ -265,9 +266,9 @@ class Run(object):
         images_list = {}
         with h5py.File(self.h5_path) as h5_file:
             for orientation in h5_file['/images'].keys():
-                images_list[orientation] = h5_file['/images'][orientation].keys()                
-        return images_list                
-    
+                images_list[orientation] = h5_file['/images'][orientation].keys()
+        return images_list
+
     def get_image_attributes(self, orientation):
         with h5py.File(self.h5_path) as h5_file:
             if not 'images' in h5_file:
@@ -367,7 +368,7 @@ class Sequence(Run):
                  h5_file.create_group('results')
 
         if caching_enabled:
-            cached_runs = zmq_get(port, 'localhost', ('get', ['runs'], None), 5)
+            cached_runs = zmq_get(port, 'localhost', ('get', ['runs'], None), storage_timeout)
         else:
             cached_runs = None
 
@@ -412,12 +413,13 @@ class Sequence(Run):
              
     def get_result_arrays(self,*args):
         raise NotImplementedError('If you want to use this feature please ask me to implement it! -Chris')
-     
-    def get_image(self,*args):
-        raise NotImplementedError('If you want to use this feature please ask me to implement it! -Chris')     
 
     def get_image(self, *args):
-        cached_images = zmq_get(port, 'localhost', ('get', ['images'] + list(args), None), 5)
+        if caching_enabled:
+            cached_images = zmq_get(port, 'localhost', ('get', ['images'] + list(args), None), storage_timeout)
+        else:
+            cached_images = None
+
         if cached_images is not None:
             too_many = set(cached_images.keys()) - set(self.runs.keys())
             for filepath in too_many:
