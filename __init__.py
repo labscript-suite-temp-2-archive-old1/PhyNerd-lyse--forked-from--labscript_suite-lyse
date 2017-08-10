@@ -90,7 +90,7 @@ def globals_diff(run1, run2, group=None):
     return dict_diff(run1.get_globals(group), run2.get_globals(group))
  
 class Run(object):
-    def __init__(self,h5_path,no_write=False):
+    def __init__(self, h5_path, no_write=False, cache=False):
         self.no_write = no_write
         self.h5_path = h5_path
         if not self.no_write:
@@ -118,7 +118,7 @@ class Run(object):
             # 'the moment.\n')
             self.no_write = True
 
-        if caching_enabled:
+        if cache:
             zmq_get(port, 'localhost', ('set', ['runs', h5_path], self), storage_timeout)
 
 
