@@ -76,8 +76,6 @@ routine_storage = _RoutineStorage()
 caching_enabled = True
 storage_timeout = 0.1
 
-port = 42519
-
 def data(filepath=None, host='localhost', port=_lyse_port, timeout=5):
     if filepath is not None:
         return _get_singleshot(filepath)
@@ -127,7 +125,7 @@ class Run(object):
             self.no_write = True
 
         if cache:
-            zmq_get(port, 'localhost', ('set', ['runs', h5_path], self), storage_timeout)
+            zmq_get(_lyse_port, 'localhost', ('set', ['runs', h5_path], self), storage_timeout)
 
 
     def set_group(self, groupname):
@@ -246,7 +244,7 @@ class Run(object):
     
     def get_image(self,orientation,label,image):
         if caching_enabled:
-            img = zmq_get(port, 'localhost', ('get', ['images', orientation, label, image, self.h5_path], None), storage_timeout)
+            img = zmq_get(_lyse_port, 'localhost', ('get', ['images', orientation, label, image, self.h5_path], None), storage_timeout)
             if img is not None:
                 return img
 
@@ -261,7 +259,7 @@ class Run(object):
                 raise Exception('Image \'%s\' not found in file'%image)
             img = array(h5_file['images'][orientation][label][image])
             if caching_enabled:
-                zmq_get(port, 'localhost', ('set', ['images', orientation, label, image, self.h5_path], img), storage_timeout)
+                zmq_get(_lyse_port, 'localhost', ('set', ['images', orientation, label, image, self.h5_path], img), storage_timeout)
             return img
 
     def get_images(self,orientation,label, *images):
@@ -376,7 +374,7 @@ class Sequence(Run):
                  h5_file.create_group('results')
 
         if caching_enabled:
-            cached_runs = zmq_get(port, 'localhost', ('get', ['runs'], None), storage_timeout)
+            cached_runs = zmq_get(_lyse_port, 'localhost', ('get', ['runs'], None), storage_timeout)
         else:
             cached_runs = None
 
@@ -424,7 +422,7 @@ class Sequence(Run):
 
     def get_image(self, *args):
         if caching_enabled:
-            cached_images = zmq_get(port, 'localhost', ('get', ['images'] + list(args), None), storage_timeout)
+            cached_images = zmq_get(_lyse_port, 'localhost', ('get', ['images'] + list(args), None), storage_timeout)
         else:
             cached_images = None
 
@@ -443,13 +441,13 @@ class Sequence(Run):
         return cached_images
 
 def save_value(key, value):
-    return zmq_get(port, 'localhost', ('set', ['cross_routine'].append(key), value), storage_timeout)
+    return zmq_get(_lyse_port, 'localhost', ('set', ['cross_routine'].append(key), value), storage_timeout)
 
 def get_saved_value(key):
-    return zmq_get(port, 'localhost', ('get', ['cross_routine'].append(key), None), storage_timeout)
+    return zmq_get(_lyse_port, 'localhost', ('get', ['cross_routine'].append(key), None), storage_timeout)
 
 def remove_saved_value(key):
-    return zmq_get(port, 'localhost', ('del', ['cross_routine'].append(key), None), storage_timeout)
+    return zmq_get(_lyse_port, 'localhost', ('del', ['cross_routine'].append(key), None), storage_timeout)
 
 def figure_to_clipboard(figure=None, **kwargs):
     """Copy a matplotlib figure to the clipboard as a png. If figure is None,
