@@ -22,6 +22,7 @@ import inspect
 import sys
 
 import labscript_utils.h5_lock, h5py
+from labscript_utils.labconfig import LabConfig
 import pandas
 from numpy import array, ndarray
 import types
@@ -45,6 +46,13 @@ check_version('zprocess', '2.2', '3.0')
 spinning_top = False
 # data to be sent back to the lyse GUI if running within lyse
 _updated_data = {}
+
+# get port that lyse is using for communication
+try:
+    _labconfig = LabConfig(required_params={"ports": ["lyse"]})
+    _lyse_port = int(_labconfig.get('ports', 'lyse'))
+except Exception:
+    _lyse_port = 42519
 
 if len(sys.argv) > 1:
     path = sys.argv[1]
@@ -70,7 +78,7 @@ storage_timeout = 0.1
 
 port = 42519
 
-def data(filepath=None, host='localhost', timeout=5):
+def data(filepath=None, host='localhost', port=_lyse_port, timeout=5):
     if filepath is not None:
         return _get_singleshot(filepath)
     else:
