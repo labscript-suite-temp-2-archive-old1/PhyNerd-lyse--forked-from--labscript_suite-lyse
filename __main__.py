@@ -44,7 +44,7 @@ check_version('qtutils', '1.5.4', '2.0')
 check_version('zprocess', '1.1.7', '3.0')
 
 import zprocess.locking
-from zprocess import ZMQServer
+from zprocess import ZMQServer, zmq_get
 
 from labscript_utils.labconfig import LabConfig, config_prefix
 from labscript_utils.setup_logging import setup_logging
@@ -228,6 +228,10 @@ class WebServer(ZMQServer):
                     del storage[keys[-1]]
                 except KeyError and IndexError:
                     return False
+                return True
+
+            elif command == "remove_shot":
+                remove_data_by_filepath(data)
                 return True
 
             # elif command == "clear":
@@ -1236,7 +1240,8 @@ class DataFrameModel(QtCore.QObject):
         # Delete one at a time from Qt model:
         for name_item in selected_name_items:
             row = name_item.row()
-            server.remove_data_by_filepath(self._model.item(row, self.COL_FILEPATH).text())
+            filepath = self._model.item(row, self.COL_FILEPATH).text()
+            zmq_get(app.port, 'localhost', ('remove_shot', [], filepath), 5)
             self._model.removeRow(row)
         self.renumber_rows()
 
