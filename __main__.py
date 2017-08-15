@@ -1237,7 +1237,8 @@ class DataFrameModel(QtCore.QObject):
         # Remove from DataFrame first:
         self.dataframe = self.dataframe.drop(index.row() for index in selected_indexes)
         self.dataframe.index = pandas.Index(range(len(self.dataframe)))
-        # Delete one at a time from Qt model:
+        # Delete one at a time from Qt model
+        # also delete any cached data for each shot from the web server's cache
         for name_item in selected_name_items:
             row = name_item.row()
             filepath = self._model.item(row, self.COL_FILEPATH).text()
