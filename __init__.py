@@ -440,14 +440,6 @@ class Sequence(Run):
 
         return cached_images
 
-def save_value(key, value):
-    return zmq_get(_lyse_port, 'localhost', ('set', ['cross_routine'].append(key), value), storage_timeout)
-
-def get_saved_value(key):
-    return zmq_get(_lyse_port, 'localhost', ('get', ['cross_routine'].append(key), None), storage_timeout)
-
-def remove_saved_value(key):
-    return zmq_get(_lyse_port, 'localhost', ('del', ['cross_routine'].append(key), None), storage_timeout)
 
 def figure_to_clipboard(figure=None, **kwargs):
     """Copy a matplotlib figure to the clipboard as a png. If figure is None,
