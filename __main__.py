@@ -1302,7 +1302,7 @@ class DataFrameModel(QtCore.QObject):
             # If df_row_index was used, check the row actually matches the filepath.
             # This might be the case if the caller was not in the main thread, which
             # is a situation vulnerable to race conditions:
-            assert filepath == self.dataframe.loc[df_row_index, ('filepath', '')]
+            assert filepath == self.dataframe.get_value(df_row_index, ('filepath', ''))
 
         if updated_row_data is not None and not dataframe_already_updated:
             for group, name in updated_row_data:
@@ -1737,7 +1737,7 @@ class FileBox(object):
             signal, _, updated_data = self.from_multishot.get()
             indices = np.where(np.in1d(self.shots_model.dataframe['filepath'].values, updated_data.keys(), assume_unique=True))[0]
             for index in indices:
-                file = self.shots_model.dataframe.loc[index, ('filepath','')]
+                file = self.shots_model.dataframe.get_value(index, ('filepath',''))
                 self.shots_model.update_row(updated_row_data=updated_data[file], df_row_index=index)
             if signal == 'done':
                 self.multishot_required = False
