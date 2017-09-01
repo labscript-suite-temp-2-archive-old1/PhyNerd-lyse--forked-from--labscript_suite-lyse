@@ -131,6 +131,8 @@ class Run(object):
     def set_group(self, groupname):
         self.group = groupname
         with h5py.File(self.h5_path) as h5_file:
+            if not 'results' in h5_file:
+                 h5_file.create_group('results')
             if not self.group in h5_file['results']:
                  h5_file['results'].create_group(self.group)
         self.no_write = False
@@ -384,7 +386,7 @@ class Sequence(Run):
                 del cached_runs[filepath]
             missing = set(run_paths) - set(cached_runs.keys())
             for filepath in missing:
-                cached_runs[filepath] = Run(path, no_write=True, cache=caching_enabled)
+                cached_runs[filepath] = Run(filepath, no_write=True, cache=caching_enabled)
             self.runs = cached_runs
         else:
             self.runs = {path: Run(path, no_write=True, cache=caching_enabled) for path in run_paths}
