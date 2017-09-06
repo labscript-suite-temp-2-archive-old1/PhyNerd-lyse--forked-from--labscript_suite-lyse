@@ -334,8 +334,12 @@ class AnalysisWorker(object):
         
         
 if __name__ == '__main__':
-    filepath = from_parent.get()
-    
+    filepath, additional_config = from_parent.get()
+    try:
+        _labconfig = LabConfig(additional_config, required_params={"ports": ["lyse"]})
+        _lyse_port = int(_labconfig.get('ports', 'lyse'))
+    except Exception:
+        pass
     # Set a meaningful client id for zprocess.locking:
     zprocess.locking.set_client_process_name('lyse-'+os.path.basename(filepath))
 

@@ -248,8 +248,8 @@ class AnalysisRoutine(object):
         # Start a worker process for this analysis routine:
         child_handles = zprocess.subprocess_with_queues('analysis_subprocess.py', self.output_box_port)
         to_worker, from_worker, worker = child_handles
-        # Tell the worker what script it with be executing:
-        to_worker.put(self.filepath)
+        # Tell the worker what script it with be executing and if there is a additional config file:
+        to_worker.put((self.filepath, additional_config))
         return to_worker, from_worker, worker
         
     def do_analysis(self, filepath):
@@ -1784,13 +1784,13 @@ class FileBox(object):
         
 class Lyse(object):
 
-    def __init__(self, additional_config=None):
+    def __init__(self):
         loader = UiLoader()
         self.ui = loader.load('main.ui', LyseMainWindow())
 
         self.connect_signals()
 
-        self.setup_config(additional_config)
+        self.setup_config()
         self.port = int(self.exp_config.get('ports', 'lyse'))
 
         # The singleshot routinebox will be connected to the filebox
@@ -2042,7 +2042,7 @@ class Lyse(object):
         self.ui.actionSave_configuration_as.setEnabled(True)
         self.ui.actionRevert_configuration.setEnabled(True)
 
-    def setup_config(self, additional_config=None):
+    def setup_config(self):
         required_config_params = {"DEFAULT": ["experiment_name"],
                                   "programs": ["text_editor",
                                                "text_editor_arguments",
@@ -2090,8 +2090,11 @@ class KeyPressQApplication(QtWidgets.QApplication):
 
 if __name__ == "__main__":
     # Load secondary config file
-    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
-        additional_config = sys.argv[1]
+    if len(sys.argv) > 1:
+        if os.path.isfile(sys.argv[1]):
+            additional_config = sys.argv[1]
+        else:
+            print("The argument you passed was not a path to a config file! It will be ignored.")
     else:
         additional_config = None
 
@@ -2100,7 +2103,7 @@ if __name__ == "__main__":
     logger.info('\n\n===============starting===============\n')
     qapplication = KeyPressQApplication(sys.argv)
     qapplication.setAttribute(QtCore.Qt.AA_DontShowIconsInMenus, False)
-    app = Lyse(additional_config)
+    app = Lyse()
 
     # Start the web server:
     server = WebServer(app.port)
