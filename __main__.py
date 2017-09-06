@@ -2090,13 +2090,12 @@ class KeyPressQApplication(QtWidgets.QApplication):
 
 if __name__ == "__main__":
     # Load secondary config file
+    additional_config = None
     if len(sys.argv) > 1:
         if os.path.isfile(sys.argv[1]):
             additional_config = sys.argv[1]
         else:
             print("The argument you passed was not a path to a config file! It will be ignored.")
-    else:
-        additional_config = None
 
     logger = setup_logging('lyse')
     labscript_utils.excepthook.set_logger(logger)
