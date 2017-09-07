@@ -73,7 +73,11 @@ class _RoutineStorage(object):
 routine_storage = _RoutineStorage()
 
 
-def data(filepath=None, host='localhost', port=_lyse_port, timeout=5):
+def data(filepath=None, host='localhost', port=-1, timeout=5):
+    # to account for changes to _lyse_port we can't default to _lyse_port
+    if port < 0:
+        port = _lyse_port
+
     if filepath is not None:
         return _get_singleshot(filepath)
     else:

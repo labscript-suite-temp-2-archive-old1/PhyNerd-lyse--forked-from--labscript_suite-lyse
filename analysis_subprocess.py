@@ -336,8 +336,8 @@ class AnalysisWorker(object):
 if __name__ == '__main__':
     filepath, additional_config = from_parent.get()
     try:
-        _labconfig = LabConfig(additional_config, required_params={"ports": ["lyse"]})
-        _lyse_port = int(_labconfig.get('ports', 'lyse'))
+        lyse._labconfig.read(additional_config)
+        lyse._lyse_port = int(lyse._labconfig.get('ports', 'lyse'))
     except Exception:
         pass
     # Set a meaningful client id for zprocess.locking:
