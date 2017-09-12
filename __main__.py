@@ -46,6 +46,7 @@ import labscript_utils.shared_drive as shared_drive
 from lyse.dataframe_utilities import (concat_with_padding,
                                       get_dataframe_from_shot,
                                       replace_with_padding)
+from lyse.cache_utilities import CacheServer, cache_port, caching_enabled, cache_timeout
 
 from qtutils.qt import QtCore, QtGui, QtWidgets
 from qtutils.qt.QtCore import pyqtSignal as Signal
@@ -160,19 +161,6 @@ class WebServer(ZMQServer):
         super(WebServer, self).__init__(*args, **kwargs)
         self.storage = {}
 
-    def remove_data_by_filepath(self, filepath, dic=None):
-        if dic is None:
-            dic = self.storage
-
-        # find top level keys
-        if filepath in dic:
-            del dic[filepath]
-
-        # recursivly search the rest
-        for k in dic.keys():
-            if isinstance(dic[k], dict):
-                self.remove_data_by_filepath(filepath, dic[k])
-
     def handler(self, request_data):
         logger.info('WebServer request: %s' % str(request_data))
         if request_data == 'hello':
@@ -195,45 +183,9 @@ class WebServer(ZMQServer):
                     raise AssertionError(str(type(h5_filepath)) + ' is not str or unicode')
                 app.filebox.incoming_queue.put(h5_filepath)
                 return 'added successfully'
-        elif isinstance(request_data, tuple):
-            command, keys, data = request_data
-
-            storage = self.storage
-            if len(keys) > 1:
-                for key in keys[:-1]:
-                    if key not in storage:
-                        storage[key] = {}
-                    storage = storage[key]
-
-            if command == "get":
-                try:
-                    return storage[keys[-1]]
-                except KeyError:
-                    return None
-                except IndexError:
-                    return storage
-
-            elif command == "set":
-                storage[keys[-1]] = data
-                return True
-
-            elif command == "del":
-                try:
-                    del storage[keys[-1]]
-                except KeyError and IndexError:
-                    return False
-                return True
-
-            elif command == "remove_shot":
-                remove_data_by_filepath(data)
-                return True
-
-            # elif command == "clear":
-            #     del self.storage
-            #     self.storage = {}
 
         return ("error: operation not supported. Recognised requests are:\n "
-                "'get dataframe'\n 'hello'\n {'filepath': <some_h5_filepath>} \n (<get/set/del/clear>, <tuple_of_storage_keys>, <data_to_store>)")
+                "'get dataframe'\n 'hello'\n {'filepath': <some_h5_filepath>}")
 
 
 class LyseMainWindow(QtWidgets.QMainWindow):
@@ -1271,7 +1223,8 @@ class DataFrameModel(QtCore.QObject):
         for name_item in selected_name_items:
             row = name_item.row()
             filepath = self._model.item(row, self.COL_FILEPATH).text()
-            zmq_get(app.port, 'localhost', ('remove_shot', [], filepath), 5)
+            if caching_enabled:
+                zmq_get(cache_port, 'localhost', ('remove_shot', [], filepath), cache_timeout)
             self._model.removeRow(row)
         self.renumber_rows()
 
@@ -2152,6 +2105,7 @@ if __name__ == "__main__":
 
     # Start the web server:
     server = WebServer(app.port)
+    cache_server = CacheServer(cache_port)
 
     # Let the interpreter run every 500ms so it sees Ctrl-C interrupts:
     timer = QtCore.QTimer()
@@ -2168,3 +2122,4 @@ if __name__ == "__main__":
     
     qapplication.exec_()
     server.shutdown()
+    cache_server.shutdown()
