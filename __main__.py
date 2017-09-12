@@ -157,9 +157,6 @@ def scientific_notation(x, sigfigs=4, mode='eng'):
 
 
 class WebServer(ZMQServer):
-    def __init__(self, *args, **kwargs):
-        super(WebServer, self).__init__(*args, **kwargs)
-        self.storage = {}
 
     def handler(self, request_data):
         logger.info('WebServer request: %s' % str(request_data))
@@ -183,7 +180,6 @@ class WebServer(ZMQServer):
                     raise AssertionError(str(type(h5_filepath)) + ' is not str or unicode')
                 app.filebox.incoming_queue.put(h5_filepath)
                 return 'added successfully'
-
         return ("error: operation not supported. Recognised requests are:\n "
                 "'get dataframe'\n 'hello'\n {'filepath': <some_h5_filepath>}")
 
