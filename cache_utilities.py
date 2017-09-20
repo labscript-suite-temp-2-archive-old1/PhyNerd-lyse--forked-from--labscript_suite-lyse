@@ -67,8 +67,9 @@ class CacheServer(ZMQServer):
                     return False
                 return True
 
-            elif command == "remove_shot":
-                self.remove_data_by_filepath(data)
+            elif command == "remove_shots":
+                for filepath in data:
+                    self.remove_data_by_filepath(filepath)
                 return True
 
             # elif command == "clear":

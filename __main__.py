@@ -36,7 +36,7 @@ check_version('qtutils', '2.0.0', '3.0.0')
 check_version('zprocess', '1.1.7', '3.0')
 
 import zprocess.locking
-from zprocess import ZMQServer, zmq_get
+from zprocess import ZMQServer, zmq_get, TimeoutError
 
 from labscript_utils.labconfig import LabConfig, config_prefix
 from labscript_utils.setup_logging import setup_logging
@@ -1216,12 +1216,18 @@ class DataFrameModel(QtCore.QObject):
         self.dataframe.index = pandas.Index(range(len(self.dataframe)))
         # Delete one at a time from Qt model
         # also delete any cached data for each shot from the web server's cache
+        filepaths = []
         for name_item in selected_name_items:
             row = name_item.row()
-            filepath = self._model.item(row, self.COL_FILEPATH).text()
-            if caching_enabled:
-                zmq_get(cache_port, 'localhost', ('remove_shot', [], filepath), cache_timeout)
+            filepaths.append(self._model.item(row, self.COL_FILEPATH).text())
             self._model.removeRow(row)
+
+        if caching_enabled:
+            try:
+                zmq_get(cache_port, 'localhost', ('remove_shots', [], filepaths), cache_timeout)
+            except TimeoutError:
+                pass
+
         self.renumber_rows()
 
     def mark_selection_not_done(self):
