@@ -27,7 +27,7 @@ import pandas
 from numpy import array, ndarray
 import types
 
-from zprocess import zmq_get
+from zprocess import zmq_get, TimeoutError
 from lyse.cache_utilities import cache_timeout, cache_port, caching_enabled
 
 __version__ = '2.1.0'
@@ -123,7 +123,10 @@ class Run(object):
             self.no_write = True
 
         if cache:
-            zmq_get(cache_port, 'localhost', ('set', ['runs', h5_path], self), cache_timeout)
+            try:
+                zmq_get(cache_port, 'localhost', ('set', ['runs', h5_path], self), cache_timeout)
+            except TimeoutError:
+                pass
 
 
     def set_group(self, groupname):
@@ -244,7 +247,10 @@ class Run(object):
     
     def get_image(self,orientation,label,image):
         if caching_enabled:
-            img = zmq_get(cache_port, 'localhost', ('get', ['images', orientation, label, image, self.h5_path], None), cache_timeout)
+            try:
+                img = zmq_get(cache_port, 'localhost', ('get', ['images', orientation, label, image, self.h5_path], None), cache_timeout)
+            except TimeoutError:
+                img = None
             if img is not None:
                 return img
 
@@ -259,7 +265,10 @@ class Run(object):
                 raise Exception('Image \'%s\' not found in file'%image)
             img = array(h5_file['images'][orientation][label][image])
             if caching_enabled:
-                zmq_get(cache_port, 'localhost', ('set', ['images', orientation, label, image, self.h5_path], img), cache_timeout)
+                try:
+                    zmq_get(cache_port, 'localhost', ('set', ['images', orientation, label, image, self.h5_path], img), cache_timeout)
+                except TimeoutError:
+                    pass
             return img
 
     def get_images(self,orientation,label, *images):
@@ -374,7 +383,10 @@ class Sequence(Run):
                  h5_file.create_group('results')
 
         if caching_enabled:
-            cached_runs = zmq_get(cache_port, 'localhost', ('get', ['runs'], None), cache_timeout)
+            try:
+                cached_runs = zmq_get(cache_port, 'localhost', ('get', ['runs'], None), cache_timeout)
+            except TimeoutError:
+                cached_runs = None
         else:
             cached_runs = None
 
@@ -422,7 +434,10 @@ class Sequence(Run):
 
     def get_image(self, *args):
         if caching_enabled:
-            cached_images = zmq_get(cache_port, 'localhost', ('get', ['images'] + list(args), None), cache_timeout)
+            try:
+                cached_images = zmq_get(cache_port, 'localhost', ('get', ['images'] + list(args), None), cache_timeout)
+            except TimeoutError:
+                cached_images = None
         else:
             cached_images = None
 
