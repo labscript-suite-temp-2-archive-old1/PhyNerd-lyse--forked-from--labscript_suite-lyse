@@ -23,18 +23,20 @@ class CacheServer(ZMQServer):
         super(CacheServer, self).__init__(*args, **kwargs)
         self.storage = {}
 
-    def remove_data_by_filepath(self, filepath, dic=None):
+    def remove_data_by_filepath(self, filepaths, dic=None):
         if dic is None:
             dic = self.storage
 
-        # find top level keys
-        if filepath in dic:
-            del dic[filepath]
+        if not isinstance(filepaths, list):
+            filepaths = [filepaths]
+
+        # find toplevel keys and delet them
+        list(map(dic.__delitem__, filter(dic.__contains__, filepaths)))
 
         # recursivly search the rest
-        for k in dic.keys():
+        for k in list(dic.keys()):
             if isinstance(dic[k], dict):
-                self.remove_data_by_filepath(filepath, dic[k])
+                self.remove_data_by_filepath(filepaths, dic[k])
 
     def handler(self, request_data):
         # logger.info('CacheServer request: %s' % str(request_data))
@@ -68,8 +70,7 @@ class CacheServer(ZMQServer):
                 return True
 
             elif command == "remove_shots":
-                for filepath in data:
-                    self.remove_data_by_filepath(filepath)
+                self.remove_data_by_filepath(data)
                 return True
 
             # elif command == "clear":
