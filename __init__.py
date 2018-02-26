@@ -30,7 +30,7 @@ import types
 from zprocess import zmq_get, TimeoutError
 from lyse.cache_utilities import cache_timeout, cache_port, caching_enabled
 
-__version__ = '2.1.0'
+__version__ = '2.2.0'
 
 try:
     from labscript_utils import check_version
@@ -81,11 +81,17 @@ def data(filepath=None, host='localhost', port=_lyse_port, timeout=5):
         df = zmq_get(port, host, 'get dataframe', timeout)
         try:
             padding = ('',)*(df.columns.nlevels - 1)
-            df.set_index([('sequence',) + padding,('run time',) + padding], inplace=True, drop=False)
-            df.index.names = ['sequence', 'run time']
-            # df.set_index(['sequence', 'run time'], inplace=True, drop=False)
+            try:
+                integer_indexing = _labconfig.getboolean('lyse', 'integer_indexing')
+            except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+                integer_indexing = False
+            if integer_indexing:
+                df.set_index(['sequence_index', 'run number', 'run repeat'], inplace=True, drop=False)
+            else:
+                df.set_index([('sequence',) + padding,('run time',) + padding], inplace=True, drop=False)
+                df.index.names = ['sequence', 'run time']
         except KeyError:
-            # Empty dataframe?
+            # Empty DataFrame or index column not found, so fall back to RangeIndex instead
             pass
         df.sort_index(inplace=True)
         return df
@@ -177,7 +183,7 @@ class Run(object):
             if name in h5_file[group].attrs.keys() and not overwrite:
                 raise Exception('Attribute %s exists in group %s. ' \
                                 'Use overwrite=True to overwrite.' % (name, group))                   
-            h5_file[group].attrs.modify(name, value)
+            h5_file[group].attrs[name] = value
             
         if spinning_top:
             if self.h5_path not in _updated_data:
