@@ -5,13 +5,14 @@ from __future__ import division, unicode_literals, print_function, absolute_impo
 import os
 import sys
 import socket
-import Queue
 import logging
 import threading
 import signal
 import subprocess
 import time
-
+import traceback
+import pprint
+import ast
 
 # Turn on our error catching for all subsequent imports
 import labscript_utils.excepthook
@@ -23,25 +24,13 @@ import numpy as np
 import labscript_utils.h5_lock
 import h5py
 import pandas
-import sip
-
-# Have to set PyQt API via sip before importing PyQt:
-API_NAMES = ["QDate", "QDateTime", "QString", "QTextStream", "QTime", "QUrl", "QVariant"]
-API_VERSION = 2
-for name in API_NAMES:
-    sip.setapi(name, API_VERSION)
-
-from PyQt4 import QtCore, QtGui
-from PyQt4.QtCore import pyqtSignal as Signal
 
 try:
     from labscript_utils import check_version
 except ImportError:
     raise ImportError('Require labscript_utils > 2.1.0')
 
-check_version('labscript_utils', '2.1', '3.0')
-check_version('qtutils', '1.5.4', '2.0')
-check_version('zprocess', '1.1.7', '3.0')
+check_version('qtutils', '2.0.0', '3.0.0')
 
 import zprocess.locking
 from zprocess import ZMQServer
@@ -55,10 +44,19 @@ from lyse.dataframe_utilities import (concat_with_padding,
                                       get_dataframe_from_shot,
                                       replace_with_padding)
 
+from qtutils.qt import QtCore, QtGui, QtWidgets
+from qtutils.qt.QtCore import pyqtSignal as Signal
 from qtutils import inmain_decorator, UiLoader, DisconnectContextManager
 from qtutils.outputbox import OutputBox
 from qtutils.auto_scroll_to_end import set_auto_scroll_to_end
 import qtutils.icons
+
+from labscript_utils import PY2
+if PY2:
+    str = unicode
+    import Queue as queue
+else:
+    import queue
 
 # Set working directory to lyse folder, resolving symlinks
 lyse_dir = os.path.dirname(os.path.realpath(__file__))
@@ -81,14 +79,14 @@ def set_win_appusermodel(window_id):
 
 @inmain_decorator()
 def error_dialog(message):
-    QtGui.QMessageBox.warning(app.ui, 'lyse', message)
+    QtWidgets.QMessageBox.warning(app.ui, 'lyse', message)
 
 
 @inmain_decorator()
 def question_dialog(message):
-    reply = QtGui.QMessageBox.question(app.ui, 'lyse', message,
-                                       QtGui.QMessageBox.Yes | QtGui.QMessageBox.No)
-    return (reply == QtGui.QMessageBox.Yes)
+    reply = QtWidgets.QMessageBox.question(app.ui, 'lyse', message,
+                                       QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+    return (reply == QtWidgets.QMessageBox.Yes)
 
 
 def scientific_notation(x, sigfigs=4, mode='eng'):
@@ -161,6 +159,17 @@ def scientific_notation(x, sigfigs=4, mode='eng'):
     return result
 
 
+def get_screen_geometry():
+    """Return the a list of the geometries of each screen: each a tuple of
+    left, top, width and height"""
+    geoms = []
+    desktop = qapplication.desktop()
+    for i in range(desktop.screenCount()):
+        sg = desktop.screenGeometry(i)
+        geoms.append((sg.left(), sg.top(), sg.width(), sg.height()))
+    return geoms
+
+
 class WebServer(ZMQServer):
 
     def handler(self, request_data):
@@ -189,20 +198,40 @@ class WebServer(ZMQServer):
                 "'get dataframe'\n 'hello'\n {'filepath': <some_h5_filepath>}")
 
 
-class LyseMainWindow(QtGui.QMainWindow):
+class LyseMainWindow(QtWidgets.QMainWindow):
+    # A signal to show that the window is shown and painted.
+    firstPaint = Signal()
+
     # A signal for when the window manager has created a new window for this widget:
     newWindow = Signal(int)
 
+    def __init__(self, *args, **kwargs):
+        QtWidgets.QMainWindow.__init__(self, *args, **kwargs)
+        self._previously_painted = False
+
+    def closeEvent(self, event):
+        if app.on_close_event():
+            return QtWidgets.QMainWindow.closeEvent(self, event)
+        else:
+            event.ignore()
+
     def event(self, event):
-        result = QtGui.QMainWindow.event(self, event)
+        result = QtWidgets.QMainWindow.event(self, event)
         if event.type() == QtCore.QEvent.WinIdChange:
             self.newWindow.emit(self.effectiveWinId())
         return result
 
-        
+    def paintEvent(self, event):
+        result = QtWidgets.QMainWindow.paintEvent(self, event)
+        if not self._previously_painted:
+            self._previously_painted = True
+            self.firstPaint.emit()
+        return result
+
+
 class AnalysisRoutine(object):
 
-    def __init__(self, filepath, model, output_box_port):
+    def __init__(self, filepath, model, output_box_port, checked=QtCore.Qt.Checked):
         self.filepath = filepath
         self.shortname = os.path.basename(self.filepath)
         self.model = model
@@ -221,7 +250,7 @@ class AnalysisRoutine(object):
         # Make a row to put into the model:
         active_item =  QtGui.QStandardItem()
         active_item.setCheckable(True)
-        active_item.setCheckState(QtCore.Qt.Checked)
+        active_item.setCheckState(checked)
         info_item = QtGui.QStandardItem()
         name_item = QtGui.QStandardItem(self.shortname)
         name_item.setToolTip(self.filepath)
@@ -337,9 +366,9 @@ class AnalysisRoutine(object):
             self.to_worker, self.from_worker, self.worker = self.start_worker()
             app.output_box.output('%s worker restarted\n'%self.shortname)
         self.exiting = False
-        
 
-class TreeView(QtGui.QTreeView):
+
+class TreeView(QtWidgets.QTreeView):
     leftClicked = Signal(QtCore.QModelIndex)
     doubleLeftClicked = Signal(QtCore.QModelIndex)
     """A QTreeView that emits a custom signal leftClicked(index) after a left
@@ -347,19 +376,19 @@ class TreeView(QtGui.QTreeView):
     double click."""
 
     def __init__(self, *args):
-        QtGui.QTreeView.__init__(self, *args)
+        QtWidgets.QTreeView.__init__(self, *args)
         self._pressed_index = None
         self._double_click = False
 
     def mousePressEvent(self, event):
-        result = QtGui.QTreeView.mousePressEvent(self, event)
+        result = QtWidgets.QTreeView.mousePressEvent(self, event)
         index = self.indexAt(event.pos())
         if event.button() == QtCore.Qt.LeftButton and index.isValid():
             self._pressed_index = self.indexAt(event.pos())
         return result
 
     def leaveEvent(self, event):
-        result = QtGui.QTreeView.leaveEvent(self, event)
+        result = QtWidgets.QTreeView.leaveEvent(self, event)
         self._pressed_index = None
         self._double_click = False
         return result
@@ -367,7 +396,7 @@ class TreeView(QtGui.QTreeView):
     def mouseDoubleClickEvent(self, event):
         # Ensure our left click event occurs regardless of whether it is the
         # second click in a double click or not
-        result = QtGui.QTreeView.mouseDoubleClickEvent(self, event)
+        result = QtWidgets.QTreeView.mouseDoubleClickEvent(self, event)
         index = self.indexAt(event.pos())
         if event.button() == QtCore.Qt.LeftButton and index.isValid():
             self._pressed_index = self.indexAt(event.pos())
@@ -375,7 +404,7 @@ class TreeView(QtGui.QTreeView):
         return result
 
     def mouseReleaseEvent(self, event):
-        result = QtGui.QTreeView.mouseReleaseEvent(self, event)
+        result = QtWidgets.QTreeView.mouseReleaseEvent(self, event)
         index = self.indexAt(event.pos())
         if event.button() == QtCore.Qt.LeftButton and index.isValid() and index == self._pressed_index:
             self.leftClicked.emit(index)
@@ -431,8 +460,8 @@ class RoutineBox(object):
         status_item.setToolTip('The status of this analyis routine\'s execution')
         name_item = QtGui.QStandardItem('name')
         name_item.setToolTip('The name of the python script for the analysis routine')
-        
-        self.select_all_checkbox = QtGui.QCheckBox()
+
+        self.select_all_checkbox = QtWidgets.QCheckBox()
         self.select_all_checkbox.setToolTip('whether the analysis routine should run')
         self.header.setWidget(self.COL_ACTIVE, self.select_all_checkbox)
         self.header.setStretchLastSection(True)
@@ -449,13 +478,13 @@ class RoutineBox(object):
         
         self.ui.treeView.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         # Make the actions for the context menu:
-        self.action_set_selected_active = QtGui.QAction(
+        self.action_set_selected_active = QtWidgets.QAction(
             QtGui.QIcon(':qtutils/fugue/ui-check-box'), 'set selected routines active',  self.ui)
-        self.action_set_selected_inactive = QtGui.QAction(
+        self.action_set_selected_inactive = QtWidgets.QAction(
             QtGui.QIcon(':qtutils/fugue/ui-check-box-uncheck'), 'set selected routines inactive',  self.ui)
-        self.action_restart_selected = QtGui.QAction(
+        self.action_restart_selected = QtWidgets.QAction(
             QtGui.QIcon(':qtutils/fugue/arrow-circle'), 'restart worker process for selected routines',  self.ui)
-        self.action_remove_selected = QtGui.QAction(
+        self.action_remove_selected = QtWidgets.QAction(
             QtGui.QIcon(':qtutils/fugue/minus'), 'Remove selected routines',  self.ui)
         self.last_opened_routine_folder = self.exp_config.get('paths', 'analysislib')
         
@@ -491,10 +520,13 @@ class RoutineBox(object):
         self.ui.toolButton_move_to_bottom.clicked.connect(self.on_move_to_bottom_clicked)
 
     def on_add_routines_clicked(self):
-        routine_files = QtGui.QFileDialog.getOpenFileNames(self.ui,
+        routine_files = QtWidgets.QFileDialog.getOpenFileNames(self.ui,
                                                            'Select analysis routines',
                                                            self.last_opened_routine_folder,
                                                            "Python scripts (*.py)")
+        if type(routine_files) is tuple:
+            routine_files, _ = routine_files
+
         if not routine_files:
             # User cancelled selection
             return
@@ -503,12 +535,24 @@ class RoutineBox(object):
 
         # Save the containing folder for use next time we open the dialog box:
         self.last_opened_routine_folder = os.path.dirname(routine_files[0])
+        self.add_routines([(routine_file, QtCore.Qt.Checked) for routine_file in routine_files])
+
+    def add_routines(self, routine_files, clear_existing=False):
+        """Add routines to the routine box, where routine_files is a list of
+        tuples containing the filepath and whether the routine is enabled or
+        not when it is added. if clear_existing == True, then any existing
+        analysis routines will be cleared before the new ones are added."""
+        if clear_existing:
+            for routine in self.routines[:]:
+                routine.remove()
+                self.routines.remove(routine)
+
         # Queue the files to be opened:
-        for filepath in routine_files:
+        for filepath, checked in routine_files:
             if filepath in [routine.filepath for routine in self.routines]:
                 app.output_box.output('Warning: Ignoring duplicate analysis routine %s\n'%filepath, red=True)
                 continue
-            routine = AnalysisRoutine(filepath, self.model, self.output_box_port)
+            routine = AnalysisRoutine(filepath, self.model, self.output_box_port, checked)
             self.routines.append(routine)
         self.update_select_all_checkstate()
         
@@ -570,7 +614,7 @@ class RoutineBox(object):
                 active_item.setCheckState(state)
         
     def on_treeView_context_menu_requested(self, point):
-        menu = QtGui.QMenu(self.ui.treeView)
+        menu = QtWidgets.QMenu(self.ui.treeView)
         menu.addAction(self.action_set_selected_active)
         menu.addAction(self.action_set_selected_inactive)
         menu.addAction(self.action_restart_selected)
@@ -751,18 +795,18 @@ class RoutineBox(object):
             routine = AnalysisRoutine(os.path.join(folder, filepath), self.model, self.output_box_port)
             self.routines.append(routine)
         self.update_select_all_checkstate()
-            
-            
-class EditColumnsDialog(QtGui.QDialog):
+
+
+class EditColumnsDialog(QtWidgets.QDialog):
     # A signal for when the window manager has created a new window for this widget:
     newWindow = Signal(int)
     close_signal = Signal()
 
     def __init__(self):
-        QtGui.QDialog.__init__(self, None, QtCore.Qt.WindowSystemMenuHint | QtCore.Qt.WindowTitleHint)
+        QtWidgets.QDialog.__init__(self, None, QtCore.Qt.WindowSystemMenuHint | QtCore.Qt.WindowTitleHint)
 
     def event(self, event):
-        result = QtGui.QDialog.event(self, event)
+        result = QtWidgets.QDialog.event(self, event)
         if event.type() == QtCore.QEvent.WinIdChange:
             self.newWindow.emit(self.effectiveWinId())
         return result
@@ -788,10 +832,10 @@ class EditColumns(object):
 
         self.model = UneditableModel()
         self.header = HorizontalHeaderViewWithWidgets(self.model)
-        self.select_all_checkbox = QtGui.QCheckBox()
+        self.select_all_checkbox = QtWidgets.QCheckBox()
         self.select_all_checkbox.setTristate(False)
         self.ui.treeView.setHeader(self.header)
-        self.proxy_model = QtGui.QSortFilterProxyModel()
+        self.proxy_model = QtCore.QSortFilterProxyModel()
         self.proxy_model.setSourceModel(self.model)
         self.proxy_model.setFilterCaseSensitivity(QtCore.Qt.CaseInsensitive)
         self.proxy_model.setFilterKeyColumn(self.COL_NAME)
@@ -803,9 +847,9 @@ class EditColumns(object):
 
         self.ui.treeView.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         # Make the actions for the context menu:
-        self.action_set_selected_visible = QtGui.QAction(
+        self.action_set_selected_visible = QtWidgets.QAction(
             QtGui.QIcon(':qtutils/fugue/ui-check-box'), 'Show selected columns',  self.ui)
-        self.action_set_selected_hidden = QtGui.QAction(
+        self.action_set_selected_hidden = QtWidgets.QAction(
             QtGui.QIcon(':qtutils/fugue/ui-check-box-uncheck'), 'Hide selected columns',  self.ui)
 
         self.connect_signals()
@@ -838,10 +882,14 @@ class EditColumns(object):
         self.ui.treeView.resizeColumnToContents(self.COL_VISIBLE)
         # Which indices in self.columns_visible the row numbers correspond to
         self.column_indices = {}
-        for column_index, name in sorted(column_names.items(), key=lambda s: s[1]):
-            if not isinstance(name, tuple):
-                # one of our special columns, ignore:
-                continue
+
+        # Remove our special columns from the dict of column names by keeping only tuples:
+        column_names = {i: name for i, name in column_names.items() if isinstance(name, tuple)}
+
+        # Sort the column names as comma separated values, converting to lower case:
+        sortkey = lambda item: ', '.join(item[1]).lower().strip(', ')
+
+        for column_index, name in sorted(column_names.items(), key=sortkey):
             visible = columns_visible[column_index]
             visible_item = QtGui.QStandardItem()
             visible_item.setCheckable(True)
@@ -853,7 +901,7 @@ class EditColumns(object):
                 visible_item.setData(QtCore.Qt.Unchecked, self.ROLE_SORT_DATA)
             name_as_string = ', '.join(name).strip(', ')
             name_item = QtGui.QStandardItem(name_as_string)
-            name_item.setData(name_as_string, self.ROLE_SORT_DATA)
+            name_item.setData(sortkey((column_index, name)), self.ROLE_SORT_DATA)
             self.model.appendRow([visible_item, name_item])
             self.column_indices[self.model.rowCount() - 1] = column_index
 
@@ -862,7 +910,7 @@ class EditColumns(object):
         self.ui.treeView.sortByColumn(self.COL_NAME, QtCore.Qt.AscendingOrder)
 
     def on_treeView_context_menu_requested(self, point):
-        menu = QtGui.QMenu(self.ui)
+        menu = QtWidgets.QMenu(self.ui)
         menu.addAction(self.action_set_selected_visible)
         menu.addAction(self.action_set_selected_hidden)
         menu.exec_(QtGui.QCursor.pos())
@@ -970,7 +1018,7 @@ class EditColumns(object):
         self.ui.hide()
 
 
-class ItemDelegate(QtGui.QStyledItemDelegate):
+class ItemDelegate(QtWidgets.QStyledItemDelegate):
 
     """An item delegate with a fixed height and a progress bar in one column"""
     EXTRA_ROW_HEIGHT = 2
@@ -980,13 +1028,13 @@ class ItemDelegate(QtGui.QStyledItemDelegate):
         self.model = model
         self.COL_STATUS = col_status
         self.ROLE_STATUS_PERCENT = role_status_percent
-        QtGui.QStyledItemDelegate.__init__(self)
+        QtWidgets.QStyledItemDelegate.__init__(self)
 
     def sizeHint(self, *args):
         fontmetrics = QtGui.QFontMetrics(self.view.font())
         text_height = fontmetrics.height()
         row_height = text_height + self.EXTRA_ROW_HEIGHT
-        size = QtGui.QStyledItemDelegate.sizeHint(self, *args)
+        size = QtWidgets.QStyledItemDelegate.sizeHint(self, *args)
         return QtCore.QSize(size.width(), row_height)
 
     def paint(self, painter, option, index):
@@ -994,7 +1042,7 @@ class ItemDelegate(QtGui.QStyledItemDelegate):
             status_percent = self.model.data(index, self.ROLE_STATUS_PERCENT)
             if status_percent == 100:
                 # Render as a normal item - this shows whatever icon is set instead of a progress bar.
-                return QtGui.QStyledItemDelegate.paint(self, painter, option, index)
+                return QtWidgets.QStyledItemDelegate.paint(self, painter, option, index)
             else:
                 # Method of rendering a progress bar into the view copied from
                 # Qt's 'network-torrent' example:
@@ -1002,8 +1050,8 @@ class ItemDelegate(QtGui.QStyledItemDelegate):
 
                 # Set up a QStyleOptionProgressBar to precisely mimic the
                 # environment of a progress bar.
-                progress_bar_option = QtGui.QStyleOptionProgressBarV2()
-                progress_bar_option.state = QtGui.QStyle.State_Enabled
+                progress_bar_option = QtWidgets.QStyleOptionProgressBar()
+                progress_bar_option.state = QtWidgets.QStyle.State_Enabled
                 progress_bar_option.direction = qapplication.layoutDirection()
                 progress_bar_option.rect = option.rect
                 progress_bar_option.fontMetrics = qapplication.fontMetrics()
@@ -1017,9 +1065,9 @@ class ItemDelegate(QtGui.QStyledItemDelegate):
                 progress_bar_option.text = '%d%%' % status_percent
 
                 # Draw the progress bar onto the view.
-                qapplication.style().drawControl(QtGui.QStyle.CE_ProgressBar, progress_bar_option, painter)
+                qapplication.style().drawControl(QtWidgets.QStyle.CE_ProgressBar, progress_bar_option, painter)
         else:
-            return QtGui.QStyledItemDelegate.paint(self, painter, option, index)
+            return QtWidgets.QStyledItemDelegate.paint(self, painter, option, index)
 
 
 class UneditableModel(QtGui.QStandardItemModel):
@@ -1031,7 +1079,7 @@ class UneditableModel(QtGui.QStandardItemModel):
         return result & ~QtCore.Qt.ItemIsEditable
 
 
-class TableView(QtGui.QTableView):
+class TableView(QtWidgets.QTableView):
     leftClicked = Signal(QtCore.QModelIndex)
     doubleLeftClicked = Signal(QtCore.QModelIndex)
     """A QTableView that emits a custom signal leftClicked(index) after a left
@@ -1041,19 +1089,19 @@ class TableView(QtGui.QTableView):
     similar TreeView class in this module"""
 
     def __init__(self, *args):
-        QtGui.QTableView.__init__(self, *args)
+        QtWidgets.QTableView.__init__(self, *args)
         self._pressed_index = None
         self._double_click = False
 
     def mousePressEvent(self, event):
-        result = QtGui.QTableView.mousePressEvent(self, event)
+        result = QtWidgets.QTableView.mousePressEvent(self, event)
         index = self.indexAt(event.pos())
         if event.button() == QtCore.Qt.LeftButton and index.isValid():
             self._pressed_index = self.indexAt(event.pos())
         return result
 
     def leaveEvent(self, event):
-        result = QtGui.QTableView.leaveEvent(self, event)
+        result = QtWidgets.QTableView.leaveEvent(self, event)
         self._pressed_index = None
         self._double_click = False
         return result
@@ -1061,7 +1109,7 @@ class TableView(QtGui.QTableView):
     def mouseDoubleClickEvent(self, event):
         # Ensure our left click event occurs regardless of whether it is the
         # second click in a double click or not
-        result = QtGui.QTableView.mouseDoubleClickEvent(self, event)
+        result = QtWidgets.QTableView.mouseDoubleClickEvent(self, event)
         index = self.indexAt(event.pos())
         if event.button() == QtCore.Qt.LeftButton and index.isValid():
             self._pressed_index = self.indexAt(event.pos())
@@ -1069,7 +1117,7 @@ class TableView(QtGui.QTableView):
         return result
 
     def mouseReleaseEvent(self, event):
-        result = QtGui.QTableView.mouseReleaseEvent(self, event)
+        result = QtWidgets.QTableView.mouseReleaseEvent(self, event)
         index = self.indexAt(event.pos())
         if event.button() == QtCore.Qt.LeftButton and index.isValid() and index == self._pressed_index:
             self.leftClicked.emit(index)
@@ -1109,19 +1157,25 @@ class DataFrameModel(QtCore.QObject):
                            """
                            
         self._header = HorizontalHeaderViewWithWidgets(self._model)
-        self._vertheader = QtGui.QHeaderView(QtCore.Qt.Vertical)
-        self._vertheader.setResizeMode(QtGui.QHeaderView.Fixed)
+        self._vertheader = QtWidgets.QHeaderView(QtCore.Qt.Vertical)
+        self._vertheader.setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
         self._vertheader.setStyleSheet(headerview_style)
         self._header.setStyleSheet(headerview_style)
         self._vertheader.setHighlightSections(True)
-        self._vertheader.setClickable(True)
+        self._vertheader.setSectionsClickable(True)
         self._view.setModel(self._model)
         self._view.setHorizontalHeader(self._header)
         self._view.setVerticalHeader(self._vertheader)
         self._delegate = ItemDelegate(self._view, self._model, self.COL_STATUS, self.ROLE_STATUS_PERCENT)
         self._view.setItemDelegate(self._delegate)
-        self._view.setSelectionBehavior(QtGui.QTableView.SelectRows)
+        self._view.setSelectionBehavior(QtWidgets.QTableView.SelectRows)
         self._view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+
+        # Check if integer indexing is to be used
+        try:
+            self.integer_indexing = self.exp_config.getboolean('lyse', 'integer_indexing')
+        except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+            self.integer_indexing = False
 
         # This dataframe will contain all the scalar data
         # from the shot files that are currently open:
@@ -1151,7 +1205,7 @@ class DataFrameModel(QtCore.QObject):
         self.deleted_columns_visible = {}
         
         # Make the actions for the context menu:
-        self.action_remove_selected = QtGui.QAction(
+        self.action_remove_selected = QtWidgets.QAction(
             QtGui.QIcon(':qtutils/fugue/minus'), 'Remove selected shots',  self._view)
 
         self.connect_signals()
@@ -1209,7 +1263,7 @@ class DataFrameModel(QtCore.QObject):
             status_item.setData(0, self.ROLE_STATUS_PERCENT)
         
     def on_view_context_menu_requested(self, point):
-        menu = QtGui.QMenu(self._view)
+        menu = QtWidgets.QMenu(self._view)
         menu.addAction(self.action_remove_selected)
         menu.exec_(QtGui.QCursor.pos())
 
@@ -1287,6 +1341,9 @@ class DataFrameModel(QtCore.QObject):
     def update_row(self, filepath, dataframe_already_updated=False, status_percent=None, new_row_data=None, updated_row_data=None, df_row_index=None):
         """"Updates a row in the dataframe and Qt model
         to the data in the HDF5 file for that shot. Also sets the percent done, if specified"""
+        # To speed things up block signals to the model during update
+        self._model.blockSignals(True)
+
         # Update the row in the dataframe first:
         if (new_row_data is None) == (updated_row_data is None) and not dataframe_already_updated:
             raise ValueError('Exactly one of new_row_data or updated_row_data must be provided')
@@ -1306,7 +1363,22 @@ class DataFrameModel(QtCore.QObject):
 
         if updated_row_data is not None and not dataframe_already_updated:
             for group, name in updated_row_data:
-                self.dataframe.loc[df_row_index, (group, name) + ('',) * (self.nlevels - 2)] = updated_row_data[group, name]
+                column_name = (group, name) + ('',) * (self.nlevels - 2)
+                value = updated_row_data[group, name]
+                try:
+                    self.dataframe.set_value(df_row_index, column_name, value)
+                except ValueError:
+                    # did the column not already exist when we tried to set an iterable?
+                    if not column_name in self.dataframe.columns:
+                        # create it with a non-iterable and then overwrite with the iterable value:
+                        self.dataframe.set_value(df_row_index, column_name, None)
+                    else:
+                        # Incompatible datatype - convert the datatype of the column to
+                        # 'object'
+                        self.dataframe[column_name] = self.dataframe[column_name].astype('object')
+                    # Now that the column exists and has dtype object, we can set the value:
+                    self.dataframe.set_value(df_row_index, column_name, value)
+
             dataframe_already_updated = True
 
         if not dataframe_already_updated:
@@ -1406,6 +1478,10 @@ class DataFrameModel(QtCore.QObject):
         if new_column_names or defunct_column_names:
             self.columns_changed.emit()
 
+        # unblock signals to the model and tell it to update
+        self._model.blockSignals(False)
+        self._model.layoutChanged.emit()
+
     def new_row(self, filepath):
         status_item = QtGui.QStandardItem()
         status_item.setData(0, self.ROLE_STATUS_PERCENT)
@@ -1421,11 +1497,23 @@ class DataFrameModel(QtCore.QObject):
         print(self._model.rowCount())
         for row_number in range(self._model.rowCount()):
             vertical_header_item = self._model.verticalHeaderItem(row_number)
-            filepath_item = self._model.item(row_number, self.COL_FILEPATH)
-            filepath = filepath_item.text()
-            basename = os.path.splitext(os.path.basename(filepath))[0]
             row_number_str = str(row_number).rjust(n_digits)
-            vert_header_text = '{}. | {}'.format(row_number_str, basename)
+            vert_header_text = '{}. |'.format(row_number_str)
+            if self.integer_indexing:
+                header_cols = ['sequence_index', 'run number', 'run repeat']
+                header_strings = []
+                for col in header_cols:
+                    try:
+                        val = self.dataframe[col].values[row_number]
+                        header_strings.append(' {:04d}'.format(val))
+                    except (KeyError, ValueError):
+                        header_strings.append('----')
+                vert_header_text += ' |'.join(header_strings)
+            else:
+                filepath_item = self._model.item(row_number, self.COL_FILEPATH)
+                filepath = filepath_item.text()
+                basename = os.path.splitext(os.path.basename(filepath))[0]
+                vert_header_text += ' ' + basename
             vertical_header_item.setText(vert_header_text)
     
     @inmain_decorator()
@@ -1503,7 +1591,7 @@ class FileBox(object):
         # A queue for storing incoming files from the ZMQ server so
         # the server can keep receiving files even if analysis is slow
         # or paused:
-        self.incoming_queue = Queue.Queue()
+        self.incoming_queue = queue.Queue()
 
         # Start the thread to handle incoming files, and store them in
         # a buffer if processing is paused:
@@ -1534,10 +1622,13 @@ class FileBox(object):
         self.edit_columns_dialog.update_columns(column_names, columns_visible)
 
     def on_add_shot_files_clicked(self):
-        shot_files = QtGui.QFileDialog.getOpenFileNames(self.ui,
+        shot_files = QtWidgets.QFileDialog.getOpenFileNames(self.ui,
                                                         'Select shot files',
                                                         self.last_opened_shots_folder,
                                                         "HDF5 files (*.h5)")
+        if type(shot_files) is tuple:
+            shot_files, _ = shot_files
+
         if not shot_files:
             # User cancelled selection
             return
@@ -1608,7 +1699,7 @@ class FileBox(object):
                 while True:
                     try:
                         filepath = self.incoming_queue.get(False)
-                    except Queue.Empty:
+                    except queue.Empty:
                         break
                     else:
                         filepaths.append(filepath)
@@ -1670,30 +1761,42 @@ class FileBox(object):
         # imported. So we'll silence them in this thread too:
         h5py._errors.silence_errors()
         while True:
-            self.analysis_pending.wait()
-            self.analysis_pending.clear()
-            at_least_one_shot_analysed = False
-            while True:
-                if not self.analysis_paused:
-                    # Find the first shot that has not finished being analysed:
-                    filepath = self.shots_model.get_first_incomplete()
-                    if filepath is not None:
-                        logger.info('analysing: %s'%filepath)
-                        self.do_singleshot_analysis(filepath)
-                        at_least_one_shot_analysed = True
-                    if filepath is None and at_least_one_shot_analysed:
-                        self.multishot_required = True
-                    if filepath is None:
+            try:
+                self.analysis_pending.wait()
+                self.analysis_pending.clear()
+                at_least_one_shot_analysed = False
+                while True:
+                    if not self.analysis_paused:
+                        # Find the first shot that has not finished being analysed:
+                        filepath = self.shots_model.get_first_incomplete()
+                        if filepath is not None:
+                            logger.info('analysing: %s'%filepath)
+                            self.do_singleshot_analysis(filepath)
+                            at_least_one_shot_analysed = True
+                        if filepath is None and at_least_one_shot_analysed:
+                            self.multishot_required = True
+                        if filepath is None:
+                            break
+                        if self.multishot_required:
+                            logger.info('doing multishot analysis')
+                            self.do_multishot_analysis()
+                    else:
+                        logger.info('analysis is paused')
                         break
-                    if self.multishot_required:
-                        logger.info('doing multishot analysis')
-                        self.do_multishot_analysis()
-                else:
-                    logger.info('analysis is paused')
-                    break
-            if self.multishot_required:
-                logger.info('doing multishot analysis')
-                self.do_multishot_analysis()
+                if self.multishot_required:
+                    logger.info('doing multishot analysis')
+                    self.do_multishot_analysis()
+            except Exception:
+                etype, value, tb = sys.exc_info()
+                orig_exception = ''.join(traceback.format_exception_only(etype, value))
+                message = ('Analysis loop encountered unexpected exception. ' +
+                           'This is a bug and should be reported. The analysis ' +
+                           'loop is continuing, but lyse may be in an inconsistent state. '
+                           'Restart lyse, or continue at your own risk. '
+                           'Original exception was:\n\n' + orig_exception)
+                # Raise the exception in a thread so we can keep running
+                zprocess.raise_exception_in_thread((RuntimeError, RuntimeError(message), tb))
+                self.pause_analysis()
             
    
     @inmain_decorator()
@@ -1715,12 +1818,12 @@ class FileBox(object):
         self.to_singleshot.put(filepath)
         while True:
             signal, status_percent, updated_data = self.from_singleshot.get()
-            if signal in ['error', 'progress']:
-                for file in updated_data:
-                    self.shots_model.update_row(file, status_percent=status_percent, updated_row_data=updated_data[file])
+            for file in updated_data:
+                # Update the data for all the rows with new data:
+                self.shots_model.update_row(file, updated_row_data=updated_data[file])
+            # Update the status percent for the the row on which analysis is actually running:
+            self.shots_model.update_row(filepath, status_percent=status_percent, dataframe_already_updated=True)
             if signal == 'done':
-                # No need to update the dataframe again, that should have been done with the last 'progress' signal:
-                self.shots_model.update_row(filepath, status_percent=status_percent, dataframe_already_updated=True)
                 return
             if signal == 'error':
                 if not os.path.exists(filepath):
@@ -1730,6 +1833,9 @@ class FileBox(object):
                 else:
                     self.pause_analysis()
                 return
+            if signal == 'progress':
+                continue
+            raise ValueError('invalid signal %s' % str(signal))
                         
     def do_multishot_analysis(self):
         self.to_multishot.put(None)
@@ -1760,12 +1866,12 @@ class Lyse(object):
 
         # The singleshot routinebox will be connected to the filebox
         # by queues:
-        to_singleshot = Queue.Queue()
-        from_singleshot = Queue.Queue()
+        to_singleshot = queue.Queue()
+        from_singleshot = queue.Queue()
 
         # So will the multishot routinebox:
-        to_multishot = Queue.Queue()
-        from_multishot = Queue.Queue()
+        to_multishot = queue.Queue()
+        from_multishot = queue.Queue()
 
         self.output_box = OutputBox(self.ui.verticalLayout_output_box)
         self.singleshot_routinebox = RoutineBox(self.ui.verticalLayout_singleshot_routinebox, self.exp_config,
@@ -1775,16 +1881,254 @@ class Lyse(object):
         self.filebox = FileBox(self.ui.verticalLayout_filebox, self.exp_config,
                                to_singleshot, from_singleshot, to_multishot, from_multishot)
 
+        self.last_save_config_file = None
+        self.last_save_data = None
+
+        self.ui.actionLoad_configuration.triggered.connect(self.on_load_configuration_triggered)
+        self.ui.actionRevert_configuration.triggered.connect(self.on_revert_configuration_triggered)
+        self.ui.actionSave_configuration.triggered.connect(self.on_save_configuration_triggered)
+        self.ui.actionSave_configuration_as.triggered.connect(self.on_save_configuration_as_triggered)
+
         self.ui.resize(1600, 900)
 
         # Set the splitters to appropriate fractions of their maximum size:
         self.ui.splitter_horizontal.setSizes([1000, 600])
         self.ui.splitter_vertical.setSizes([300, 600])
+
+        # autoload a config file, if labconfig is set to do so:
+        try:
+            autoload_config_file = self.exp_config.get('lyse', 'autoload_config_file')
+        except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+            self.output_box.output('Ready.\n\n')
+        else:
+            self.ui.setEnabled(False)
+            self.output_box.output('Loading default config file %s...' % autoload_config_file)
+
+            def load_the_config_file():
+                try:
+                    self.load_configuration(autoload_config_file)
+                    self.output_box.output('done.\n')
+                except Exception as e:
+                    self.output_box.output('\nCould not load config file: %s: %s\n\n' %
+                                           (e.__class__.__name__, str(e)), red=True)
+                else:
+                    self.output_box.output('Ready.\n\n')
+                finally:
+                    self.ui.setEnabled(True)
+            # Defer this until 50ms after the window has shown,
+            # so that the GUI pops up faster in the meantime
+            self.ui.firstPaint.connect(lambda: QtCore.QTimer.singleShot(50, load_the_config_file))
+
         self.ui.show()
         # self.ui.showMaximized()
 
+    def on_close_event(self):
+        save_data = self.get_save_data()
+        if self.last_save_data is not None and save_data != self.last_save_data:
+            if self.only_window_geometry_is_different(save_data, self.last_save_data):
+                self.save_configuration(self.last_save_config_file)
+                return True
+
+            message = ('Current configuration (which scripts are loaded and other GUI state) '
+                       'has changed: save config file \'%s\'?' % self.last_save_config_file)
+            reply = QtWidgets.QMessageBox.question(self.ui, 'Quit lyse', message,
+                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel)
+            if reply == QtWidgets.QMessageBox.Cancel:
+                return False
+            if reply == QtWidgets.QMessageBox.Yes:
+                self.save_configuration(self.last_save_config_file)
+        return True
+
+    def on_save_configuration_triggered(self):
+        if self.last_save_config_file is None:
+            self.on_save_configuration_as_triggered()
+            self.ui.actionSave_configuration_as.setEnabled(True)
+            self.ui.actionRevert_configuration.setEnabled(True)
+        else:
+            self.save_configuration(self.last_save_config_file)
+
+    def on_revert_configuration_triggered(self):
+        save_data = self.get_save_data()
+        if self.last_save_data is not None and save_data != self.last_save_data:
+            message = 'Revert configuration to the last saved state in \'%s\'?' % self.last_save_config_file
+            reply = QtWidgets.QMessageBox.question(self.ui, 'Load configuration', message,
+                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel)
+            if reply == QtWidgets.QMessageBox.Cancel:
+                return
+            elif reply == QtWidgets.QMessageBox.Yes:
+                self.load_configuration(self.last_save_config_file)
+        else:
+            error_dialog('no changes to revert')
+
+    def on_save_configuration_as_triggered(self):
+        if self.last_save_config_file is not None:
+            default = self.last_save_config_file
+        else:
+            try:
+                default_path = os.path.join(self.exp_config.get('DEFAULT', 'app_saved_configs'), 'lyse')
+            except LabConfig.NoOptionError:
+                self.exp_config.set('DEFAULT', 'app_saved_configs', os.path.join('%(labscript_suite)s', 'userlib', 'app_saved_configs', '%(experiment_name)s'))
+                default_path = os.path.join(self.exp_config.get('DEFAULT', 'app_saved_configs'), 'lyse')
+            if not os.path.exists(default_path):
+                os.makedirs(default_path)
+
+            default = os.path.join(default_path, 'lyse.ini')
+        save_file = QtWidgets.QFileDialog.getSaveFileName(self.ui,
+                                                      'Select  file to save current lyse configuration',
+                                                      default,
+                                                      "config files (*.ini)")
+        if type(save_file) is tuple:
+            save_file, _ = save_file
+
+        if not save_file:
+            # User cancelled
+            return
+        # Convert to standard platform specific path, otherwise Qt likes
+        # forward slashes:
+        save_file = os.path.abspath(save_file)
+        self.save_configuration(save_file)
+
+    def only_window_geometry_is_different(self, current_data, old_data):
+        ui_keys = ['window_size', 'window_pos', 'splitter', 'splitter_vertical', 'splitter_horizontal']
+        compare = [current_data[key] == old_data[key] for key in current_data.keys() if key not in ui_keys]
+        return all(compare)
+
+    def get_save_data(self):
+        save_data = {}
+
+        box = self.singleshot_routinebox
+        save_data['SingleShot'] = zip([routine.filepath for routine in box.routines], [box.model.item(row, box.COL_ACTIVE).checkState()  for row in range(box.model.rowCount())])
+        save_data['LastSingleShotFolder'] = box.last_opened_routine_folder
+        box = self.multishot_routinebox
+        save_data['MultiShot'] = zip([routine.filepath for routine in box.routines], [box.model.item(row, box.COL_ACTIVE).checkState()  for row in range(box.model.rowCount())])
+        save_data['LastMultiShotFolder'] = box.last_opened_routine_folder
+
+        save_data['LastFileBoxFolder'] = self.filebox.last_opened_shots_folder
+
+        save_data['analysis_paused'] = self.filebox.analysis_paused
+        window_size = self.ui.size()
+        save_data['window_size'] = (window_size.width(), window_size.height())
+        window_pos = self.ui.pos()
+
+        save_data['window_pos'] = (window_pos.x(), window_pos.y())
+
+        save_data['screen_geometry'] = get_screen_geometry()
+        save_data['splitter'] = self.ui.splitter.sizes()
+        save_data['splitter_vertical'] = self.ui.splitter_vertical.sizes()
+        save_data['splitter_horizontal'] = self.ui.splitter_horizontal.sizes()
+        return save_data
+
+    def save_configuration(self, save_file):
+        lyse_config = LabConfig(save_file)
+        save_data = self.get_save_data()
+        self.last_save_config_file = save_file
+        self.last_save_data = save_data
+        for key, value in save_data.items():
+            lyse_config.set('lyse_state', key, pprint.pformat(value))
+
+    def on_load_configuration_triggered(self):
+        save_data = self.get_save_data()
+        if self.last_save_data is not None and save_data != self.last_save_data:
+            message = ('Current configuration (which groups are active/open and other GUI state) '
+                       'has changed: save config file \'%s\'?' % self.last_save_config_file)
+            reply = QtWidgets.QMessageBox.question(self.ui, 'Load configuration', message,
+                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel)
+            if reply == QtWidgets.QMessageBox.Cancel:
+                return
+            if reply == QtWidgets.QMessageBox.Yes:
+                self.save_configuration(self.last_save_config_file)
+
+        if self.last_save_config_file is not None:
+            default = self.last_save_config_file
+        else:
+            default = os.path.join(self.exp_config.get('paths', 'experiment_shot_storage'), 'lyse.ini')
+
+        file = QtWidgets.QFileDialog.getOpenFileName(self.ui,
+                                                 'Select lyse configuration file to load',
+                                                 default,
+                                                 "config files (*.ini)")
+        if type(file) is tuple:
+            file, _ = file
+
+        if not file:
+            # User cancelled
+            return
+        # Convert to standard platform specific path, otherwise Qt likes
+        # forward slashes:
+        file = os.path.abspath(file)
+        self.load_configuration(file)
+
+    def load_configuration(self, filename):
+        self.last_save_config_file = filename
+        self.ui.actionSave_configuration.setText('Save configuration %s' % filename)
+        lyse_config = LabConfig(filename)
+
+        try:
+            self.singleshot_routinebox.add_routines(ast.literal_eval(lyse_config.get('lyse_state', 'SingleShot')), clear_existing=True)
+        except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+            pass
+        try:
+            self.singleshot_routinebox.last_opened_routine_folder = ast.literal_eval(lyse_config.get('lyse_state', 'LastSingleShotFolder'))
+        except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+            pass
+        try:
+            self.multishot_routinebox.add_routines(ast.literal_eval(lyse_config.get('lyse_state', 'MultiShot')), clear_existing=True)
+        except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+            pass
+        try:
+            self.multishot_routinebox.last_opened_routine_folder = ast.literal_eval(lyse_config.get('lyse_state', 'LastMultiShotFolder'))
+        except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+            pass
+        try:
+            self.filebox.last_opened_shots_folder = ast.literal_eval(lyse_config.get('lyse_state', 'LastFileBoxFolder'))
+        except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+            pass
+        try:
+            if ast.literal_eval(lyse_config.get('lyse_state', 'analysis_paused')):
+                self.filebox.pause_analysis()
+        except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+            pass
+        try:
+            screen_geometry = ast.literal_eval(lyse_config.get('lyse_state', 'screen_geometry'))
+        except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+            pass
+        else:
+            # Only restore the window size and position, and splitter
+            # positions if the screen is the same size/same number of monitors
+            # etc. This prevents the window moving off the screen if say, the
+            # position was saved when 2 monitors were plugged in but there is
+            # only one now, and the splitters may not make sense in light of a
+            # different window size, so better to fall back to defaults:
+            current_screen_geometry = get_screen_geometry()
+            if current_screen_geometry == screen_geometry:
+                try:
+                    self.ui.resize(*ast.literal_eval(lyse_config.get('lyse_state', 'window_size')))
+                except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+                    pass
+                try:
+                    self.ui.move(*ast.literal_eval(lyse_config.get('lyse_state', 'window_pos')))
+                except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+                    pass
+                try:
+                    self.ui.splitter.setSizes(ast.literal_eval(lyse_config.get('lyse_state', 'splitter')))
+                except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+                    pass
+                try:
+                    self.ui.splitter_vertical.setSizes(ast.literal_eval(lyse_config.get('lyse_state', 'splitter_vertical')))
+                except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+                    pass
+                try:
+                    self.ui.splitter_horizontal.setSizes(ast.literal_eval(lyse_config.get('lyse_state', 'splitter_horizontal')))
+                except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+                    pass
+
+        # Set as self.last_save_data:
+        save_data = self.get_save_data()
+        self.last_save_data = save_data
+        self.ui.actionSave_configuration_as.setEnabled(True)
+        self.ui.actionRevert_configuration.setEnabled(True)
+
     def setup_config(self):
-        config_path = os.path.join(config_prefix, '%s.ini' % socket.gethostname())
         required_config_params = {"DEFAULT": ["experiment_name"],
                                   "programs": ["text_editor",
                                                "text_editor_arguments",
@@ -1795,7 +2139,7 @@ class Lyse(object):
                                             "analysislib"],
                                   "ports": ["lyse"]
                                   }
-        self.exp_config = LabConfig(config_path, required_config_params)
+        self.exp_config = LabConfig(required_params=required_config_params)
 
     def connect_signals(self):
         if os.name == 'nt':
@@ -1812,9 +2156,9 @@ class Lyse(object):
                 self.singleshot_routinebox.remove_selection(confirm)
             if self.multishot_routinebox.ui.treeView.hasFocus():
                 self.multishot_routinebox.remove_selection(confirm)
-                
-                
-class KeyPressQApplication(QtGui.QApplication):
+
+
+class KeyPressQApplication(QtWidgets.QApplication):
 
     """A Qapplication that emits a signal keyPress(key) on keypresses"""
     keyPress = Signal(int, QtCore.Qt.KeyboardModifiers, bool)
@@ -1825,9 +2169,9 @@ class KeyPressQApplication(QtGui.QApplication):
             self.keyPress.emit(event.key(), event.modifiers(), event.isAutoRepeat())
         elif event.type() == QtCore.QEvent.KeyRelease and event.key():
             self.keyRelease.emit(event.key(), event.modifiers(), event.isAutoRepeat())
-        return QtGui.QApplication.notify(self, object, event)
-        
-        
+        return QtWidgets.QApplication.notify(self, object, event)
+
+
 if __name__ == "__main__":
     logger = setup_logging('lyse')
     labscript_utils.excepthook.set_logger(logger)

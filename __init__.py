@@ -11,24 +11,24 @@
 #                                                                   #
 #####################################################################
 
-from dataframe_utilities import get_series_from_shot as _get_singleshot
-from dataframe_utilities import dict_diff
+from __future__ import division, unicode_literals, print_function, absolute_import
+    
+from lyse.dataframe_utilities import get_series_from_shot as _get_singleshot, dict_diff
 import os
-import urllib
-import urllib2
 import socket
 import pickle as pickle
 import inspect
 import sys
 
 import labscript_utils.h5_lock, h5py
+from labscript_utils.labconfig import LabConfig
 import pandas
 from numpy import array, ndarray
 import types
 
 from zprocess import zmq_get
 
-__version__ = '2.1.0'
+__version__ = '2.2.0'
 
 try:
     from labscript_utils import check_version
@@ -37,7 +37,11 @@ except ImportError:
 
 # require pandas v0.15.0 up to the next major version
 check_version('pandas', '0.15.0', '1.0')
-check_version('zprocess', '2.2', '3.0')
+check_version('zprocess', '2.2.0', '3.0')
+check_version('labscript_utils', '2.4', '3.0')
+from labscript_utils import PY2
+if PY2:
+    str = unicode
 
 # If running stand-alone, and not from within lyse, the below two variables
 # will be as follows. Otherwise lyse will override them with spinning_top =
@@ -45,6 +49,13 @@ check_version('zprocess', '2.2', '3.0')
 spinning_top = False
 # data to be sent back to the lyse GUI if running within lyse
 _updated_data = {}
+
+# get port that lyse is using for communication
+try:
+    _labconfig = LabConfig(required_params={"ports": ["lyse"]})
+    _lyse_port = int(_labconfig.get('ports', 'lyse'))
+except Exception:
+    _lyse_port = 42519
 
 if len(sys.argv) > 1:
     path = sys.argv[1]
@@ -65,19 +76,24 @@ class _RoutineStorage(object):
 routine_storage = _RoutineStorage()
 
 
-def data(filepath=None, host='localhost', timeout=5):
+def data(filepath=None, host='localhost', port=_lyse_port, timeout=5):
     if filepath is not None:
         return _get_singleshot(filepath)
     else:
-        port = 42519
         df = zmq_get(port, host, 'get dataframe', timeout)
         try:
             padding = ('',)*(df.columns.nlevels - 1)
-            df.set_index([('sequence',) + padding,('run time',) + padding], inplace=True, drop=False)
-            df.index.names = ['sequence', 'run time']
-            # df.set_index(['sequence', 'run time'], inplace=True, drop=False)
+            try:
+                integer_indexing = _labconfig.getboolean('lyse', 'integer_indexing')
+            except (LabConfig.NoOptionError, LabConfig.NoSectionError):
+                integer_indexing = False
+            if integer_indexing:
+                df.set_index(['sequence_index', 'run number', 'run repeat'], inplace=True, drop=False)
+            else:
+                df.set_index([('sequence',) + padding,('run time',) + padding], inplace=True, drop=False)
+                df.index.names = ['sequence', 'run time']
         except KeyError:
-            # Empty dataframe?
+            # Empty DataFrame or index column not found, so fall back to RangeIndex instead
             pass
         df.sort_index(inplace=True)
         return df
@@ -101,6 +117,9 @@ class Run(object):
                 # this Run object:
                 frame = inspect.currentframe()
                 __file__ = frame.f_back.f_locals['__file__']
+                if PY2:
+                    __file__ = __file__.decode(sys.getfilesystemencoding())
+                    print(repr(__file__))
                 self.group = os.path.basename(__file__).split('.py')[0]
                 with h5py.File(h5_path) as h5_file:
                     if not self.group in h5_file['results']:
@@ -160,7 +179,7 @@ class Run(object):
             if name in h5_file[group].attrs.keys() and not overwrite:
                 raise Exception('Attribute %s exists in group %s. ' \
                                 'Use overwrite=True to overwrite.' % (name, group))                   
-            h5_file[group].attrs.modify(name, value)
+            h5_file[group].attrs[name] = value
             
         if spinning_top:
             if self.h5_path not in _updated_data:
@@ -211,7 +230,7 @@ class Run(object):
         names = args[::2]
         values = args[1::2]
         for name, value in zip(names, values):
-            print 'saving %s ='%name, value
+            print('saving %s =' % name, value)
             self.save_result(name, value)
             
     def save_results_dict(self, results_dict, uncertainties=False, **kwargs):
@@ -359,6 +378,8 @@ class Sequence(Run):
         frame = inspect.currentframe()
         try:
             __file__ = frame.f_back.f_locals['__file__']
+            if PY2:
+                __file__ = __file__.decode(sys.getfilesystemencoding())
             self.group = os.path.basename(__file__).split('.py')[0]
             with h5py.File(h5_path) as h5_file:
                 if not self.group in h5_file['results']:
