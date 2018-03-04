@@ -11,11 +11,10 @@
 #                                                                   #
 #####################################################################
 
-from dataframe_utilities import get_series_from_shot as _get_singleshot
-from dataframe_utilities import dict_diff
+from __future__ import division, unicode_literals, print_function, absolute_import
+    
+from lyse.dataframe_utilities import get_series_from_shot as _get_singleshot, dict_diff
 import os
-import urllib
-import urllib2
 import socket
 import pickle as pickle
 import inspect
@@ -39,7 +38,11 @@ except ImportError:
 
 # require pandas v0.15.0 up to the next major version
 check_version('pandas', '0.15.0', '1.0')
-check_version('zprocess', '2.2', '3.0')
+check_version('zprocess', '2.2.0', '3.0')
+check_version('labscript_utils', '2.6', '3.0')
+from labscript_utils import PY2
+if PY2:
+    str = unicode
 
 # If running stand-alone, and not from within lyse, the below two variables
 # will be as follows. Otherwise lyse will override them with spinning_top =
@@ -115,6 +118,9 @@ class Run(object):
                 # this Run object:
                 frame = inspect.currentframe()
                 __file__ = frame.f_back.f_locals['__file__']
+                if PY2:
+                    __file__ = __file__.decode(sys.getfilesystemencoding())
+                    print(repr(__file__))
                 self.group = os.path.basename(__file__).split('.py')[0]
                 with h5py.File(h5_path) as h5_file:
                     if not self.group in h5_file['results']:
@@ -147,7 +153,7 @@ class Run(object):
     def trace_names(self):
         with h5py.File(self.h5_path) as h5_file:
             try:
-                return h5_file['data']['traces'].keys()
+                return list(h5_file['data']['traces'].keys())
             except KeyError:
                 return []
 
@@ -180,7 +186,7 @@ class Run(object):
             elif not group in h5_file:
                 # Create the group if it doesn't exist
                 h5_file.create_group(group) 
-            if name in h5_file[group].attrs.keys() and not overwrite:
+            if name in h5_file[group].attrs and not overwrite:
                 raise Exception('Attribute %s exists in group %s. ' \
                                 'Use overwrite=True to overwrite.' % (name, group))                   
             h5_file[group].attrs[name] = value
@@ -234,7 +240,7 @@ class Run(object):
         names = args[::2]
         values = args[1::2]
         for name, value in zip(names, values):
-            print 'saving %s ='%name, value
+            print('saving %s =' % name, value)
             self.save_result(name, value)
             
     def save_results_dict(self, results_dict, uncertainties=False, **kwargs):
@@ -287,9 +293,9 @@ class Run(object):
         images_list = {}
         with h5py.File(self.h5_path) as h5_file:
             for orientation in h5_file['/images'].keys():
-                images_list[orientation] = h5_file['/images'][orientation].keys()
-        return images_list
-
+                images_list[orientation] = list(h5_file['/images'][orientation].keys())               
+        return images_list                
+    
     def get_image_attributes(self, orientation):
         with h5py.File(self.h5_path) as h5_file:
             if not 'images' in h5_file:
@@ -370,7 +376,7 @@ class Run(object):
     def globals_groups(self):
         with h5py.File(self.h5_path) as h5_file:
             try:
-                return h5_file['globals'].keys()
+                return list(h5_file['globals'].keys())
             except KeyError:
                 return []   
                 
@@ -413,6 +419,8 @@ class Sequence(Run):
         frame = inspect.currentframe()
         try:
             __file__ = frame.f_back.f_locals['__file__']
+            if PY2:
+                __file__ = __file__.decode(sys.getfilesystemencoding())
             self.group = os.path.basename(__file__).split('.py')[0]
             with h5py.File(h5_path) as h5_file:
                 if not self.group in h5_file['results']:

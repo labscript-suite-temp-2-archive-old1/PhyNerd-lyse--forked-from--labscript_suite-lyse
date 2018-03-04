@@ -5,7 +5,6 @@ from __future__ import division, unicode_literals, print_function, absolute_impo
 import os
 import sys
 import socket
-import Queue
 import logging
 import threading
 import signal
@@ -31,9 +30,7 @@ try:
 except ImportError:
     raise ImportError('Require labscript_utils > 2.1.0')
 
-check_version('labscript_utils', '2.1', '3.0')
-check_version('qtutils', '2.0.0', '3.0.0')
-check_version('zprocess', '1.1.7', '3.0')
+check_version('qtutils', '2.1.0', '3.0.0')
 
 import zprocess.locking
 from zprocess import ZMQServer, zmq_get, TimeoutError
@@ -50,10 +47,17 @@ from lyse.cache_utilities import CacheServer, cache_port, caching_enabled, cache
 
 from qtutils.qt import QtCore, QtGui, QtWidgets
 from qtutils.qt.QtCore import pyqtSignal as Signal
-from qtutils import inmain_decorator, UiLoader, DisconnectContextManager
+from qtutils import inmain_decorator, inmain, UiLoader, DisconnectContextManager
 from qtutils.outputbox import OutputBox
 from qtutils.auto_scroll_to_end import set_auto_scroll_to_end
 import qtutils.icons
+
+from labscript_utils import PY2
+if PY2:
+    str = unicode
+    import Queue as queue
+else:
+    import queue
 
 # Set working directory to lyse folder, resolving symlinks
 lyse_dir = os.path.dirname(os.path.realpath(__file__))
@@ -187,8 +191,10 @@ class WebServer(ZMQServer):
         elif isinstance(request_data, dict):
             if 'filepath' in request_data:
                 h5_filepath = shared_drive.path_to_local(request_data['filepath'])
-                if not (isinstance(h5_filepath, unicode) or isinstance(h5_filepath, str)):
-                    raise AssertionError(str(type(h5_filepath)) + ' is not str or unicode')
+                if isinstance(h5_filepath, bytes):
+                    h5_filepath = h5_filepath.decode('utf8')
+                if not isinstance(h5_filepath, str):
+                    raise AssertionError(str(type(h5_filepath)) + ' is not str or bytes')
                 app.filebox.incoming_queue.put(h5_filepath)
                 return 'added successfully'
         return ("error: operation not supported. Recognised requests are:\n "
@@ -879,10 +885,14 @@ class EditColumns(object):
         self.ui.treeView.resizeColumnToContents(self.COL_VISIBLE)
         # Which indices in self.columns_visible the row numbers correspond to
         self.column_indices = {}
-        for column_index, name in sorted(column_names.items(), key=lambda s: s[1]):
-            if not isinstance(name, tuple):
-                # one of our special columns, ignore:
-                continue
+
+        # Remove our special columns from the dict of column names by keeping only tuples:
+        column_names = {i: name for i, name in column_names.items() if isinstance(name, tuple)}
+
+        # Sort the column names as comma separated values, converting to lower case:
+        sortkey = lambda item: ', '.join(item[1]).lower().strip(', ')
+
+        for column_index, name in sorted(column_names.items(), key=sortkey):
             visible = columns_visible[column_index]
             visible_item = QtGui.QStandardItem()
             visible_item.setCheckable(True)
@@ -894,7 +904,7 @@ class EditColumns(object):
                 visible_item.setData(QtCore.Qt.Unchecked, self.ROLE_SORT_DATA)
             name_as_string = ', '.join(name).strip(', ')
             name_item = QtGui.QStandardItem(name_as_string)
-            name_item.setData(name_as_string, self.ROLE_SORT_DATA)
+            name_item.setData(sortkey((column_index, name)), self.ROLE_SORT_DATA)
             self.model.appendRow([visible_item, name_item])
             self.column_indices[self.model.rowCount() - 1] = column_index
 
@@ -1136,6 +1146,8 @@ class DataFrameModel(QtCore.QObject):
         self._view = view
         self.exp_config = exp_config
         self._model = UneditableModel()
+        self.row_number_by_filepath = {}
+        self._previous_n_digits = 0
 
         headerview_style = """
                            QHeaderView {
@@ -1205,17 +1217,6 @@ class DataFrameModel(QtCore.QObject):
     def connect_signals(self):
         self._view.customContextMenuRequested.connect(self.on_view_context_menu_requested)
         self.action_remove_selected.triggered.connect(self.on_remove_selection)
-
-    def get_model_row_by_filepath(self, filepath):
-        filepath_colname = ('filepath',) + ('',) * (self.nlevels - 1)
-        possible_items = self._model.findItems(filepath, column=self.column_indices[filepath_colname])
-        if len(possible_items) > 1:
-            raise LookupError('Multiple items found')
-        elif not possible_items:
-            raise LookupError('No item found')
-        item = possible_items[0]
-        index = item.index()
-        return index.row()
 
     def on_remove_selection(self):
         self.remove_selection()
@@ -1328,8 +1329,8 @@ class DataFrameModel(QtCore.QObject):
             # Shot has been removed from FileBox, nothing to do here:
             return
 
-        model_row_number = self.get_model_row_by_filepath(filepath)
-        status_item = self._model.item(model_row_number, self.COL_STATUS)
+        row_number = self.row_number_by_filepath[filepath]
+        status_item = self._model.item(row_number, self.COL_STATUS)
         already_marked_as_deleted = status_item.data(self.ROLE_DELETED_OFF_DISK)
         if already_marked_as_deleted:
             return
@@ -1346,34 +1347,39 @@ class DataFrameModel(QtCore.QObject):
     def update_row(self, filepath, dataframe_already_updated=False, status_percent=None, new_row_data=None, updated_row_data=None):
         """"Updates a row in the dataframe and Qt model
         to the data in the HDF5 file for that shot. Also sets the percent done, if specified"""
+        # To speed things up block signals to the model during update
+        self._model.blockSignals(True)
+
         # Update the row in the dataframe first:
         if (new_row_data is None) == (updated_row_data is None) and not dataframe_already_updated:
             raise ValueError('Exactly one of new_row_data or updated_row_data must be provided')
 
-        df_row_index = np.where(self.dataframe['filepath'].values == filepath)
         try:
-            df_row_index = df_row_index[0][0]
-        except IndexError:
+            row_number = self.row_number_by_filepath[filepath]
+        except KeyError:
             # Row has been deleted, nothing to do here:
             return
+
+        filepath_colname = ('filepath',) + ('',) * (self.nlevels - 1)
+        assert filepath == self.dataframe.get_value(row_number, filepath_colname)
 
         if updated_row_data is not None and not dataframe_already_updated:
             for group, name in updated_row_data:
                 column_name = (group, name) + ('',) * (self.nlevels - 2)
                 value = updated_row_data[group, name]
                 try:
-                    self.dataframe.set_value(df_row_index, column_name, value)
+                    self.dataframe.set_value(row_number, column_name, value)
                 except ValueError:
                     # did the column not already exist when we tried to set an iterable?
                     if not column_name in self.dataframe.columns:
                         # create it with a non-iterable and then overwrite with the iterable value:
-                        self.dataframe.set_value(df_row_index, column_name, None)
+                        self.dataframe.set_value(row_number, column_name, None)
                     else:
                         # Incompatible datatype - convert the datatype of the column to
                         # 'object'
                         self.dataframe[column_name] = self.dataframe[column_name].astype('object')
                     # Now that the column exists and has dtype object, we can set the value:
-                    self.dataframe.set_value(df_row_index, column_name, value)
+                    self.dataframe.set_value(row_number, column_name, value)
 
             dataframe_already_updated = True
 
@@ -1381,7 +1387,7 @@ class DataFrameModel(QtCore.QObject):
             if new_row_data is None:
                 raise ValueError("If dataframe_already_updated is False, then new_row_data, as returned "
                                  "by dataframe_utils.get_dataframe_from_shot(filepath) must be provided.")
-            self.dataframe = replace_with_padding(self.dataframe, new_row_data, df_row_index)
+            self.dataframe = replace_with_padding(self.dataframe, new_row_data, row_number)
             self.update_column_levels()
 
         # Check and create necessary new columns in the Qt model:
@@ -1433,20 +1439,13 @@ class DataFrameModel(QtCore.QObject):
             self.column_indices = {name: index for index, name in self.column_names.items()}
 
         # Update the data in the Qt model:
-        model_row_number = self.get_model_row_by_filepath(filepath)
-        dataframe_row = self.dataframe.iloc[df_row_index].to_dict()
+        dataframe_row = self.dataframe.iloc[row_number].to_dict()
         for column_number, column_name in self.column_names.items():
             if not isinstance(column_name, tuple):
                 # One of our special columns, does not correspond to a column in the dataframe:
                 continue
             if updated_row_data is not None and column_name not in updated_row_data:
                 continue
-            item = self._model.item(model_row_number, column_number)
-            if item is None:
-                # This is the first time we've written a value to this part of the model:
-                item = QtGui.QStandardItem('NaN')
-                item.setData(QtCore.Qt.AlignCenter, QtCore.Qt.TextAlignmentRole)
-                self._model.setItem(model_row_number, column_number, item)
             value = dataframe_row[column_name]
             if isinstance(value, float):
                 value_str = scientific_notation(value)
@@ -1457,7 +1456,15 @@ class DataFrameModel(QtCore.QObject):
                 short_value_str = lines[0] + ' ...'
             else:
                 short_value_str = value_str
-            item.setText(short_value_str)
+
+            item = self._model.item(row_number, column_number)
+            if item is None:
+                # This is the first time we've written a value to this part of the model:
+                item = QtGui.QStandardItem(short_value_str)
+                item.setData(QtCore.Qt.AlignCenter, QtCore.Qt.TextAlignmentRole)
+                self._model.setItem(row_number, column_number, item)
+            else:
+                item.setText(short_value_str)
             item.setToolTip(repr(value))
 
         for i, column_name in enumerate(sorted(new_column_names)):
@@ -1466,11 +1473,15 @@ class DataFrameModel(QtCore.QObject):
             self._view.resizeColumnToContents(column_number)
 
         if status_percent is not None:
-            status_item = self._model.item(model_row_number, self.COL_STATUS)
+            status_item = self._model.item(row_number, self.COL_STATUS)
             status_item.setData(status_percent, self.ROLE_STATUS_PERCENT)
             
         if new_column_names or defunct_column_names:
             self.columns_changed.emit()
+
+        # unblock signals to the model and tell it to update
+        self._model.blockSignals(False)
+        self._model.layoutChanged.emit()
 
     def new_row(self, filepath):
         status_item = QtGui.QStandardItem()
@@ -1479,15 +1490,29 @@ class DataFrameModel(QtCore.QObject):
         name_item = QtGui.QStandardItem(filepath)
         return [status_item, name_item]
 
-    def renumber_rows(self):
-        """Add/update row indices - the rows are numbered in simple sequential order
-        for easy comparison with the dataframe"""
+    def renumber_rows(self, add_from=0):
+        """Add/update row indices - the rows are numbered in simple sequential
+        order for easy comparison with the dataframe. add_from allows you to
+        only add numbers for new rows from the given index as a performance
+        optimisation, though if the number of digits changes, all rows will
+        still be renumbered. add_from should not be used if rows have been
+        deleted."""
         n_digits = len(str(self._model.rowCount()))
-        print(self._model.rowCount())
-        for row_number in range(self._model.rowCount()):
+        if n_digits != self._previous_n_digits:
+            # All labels must be updated:
+            add_from = 0
+        self._previous_n_digits = n_digits
+
+        if add_from == 0:
+            self.row_number_by_filepath = {}
+
+        for row_number in range(add_from, self._model.rowCount()):
             vertical_header_item = self._model.verticalHeaderItem(row_number)
             row_number_str = str(row_number).rjust(n_digits)
             vert_header_text = '{}. |'.format(row_number_str)
+            filepath_item = self._model.item(row_number, self.COL_FILEPATH)
+            filepath = filepath_item.text()
+            self.row_number_by_filepath[filepath] = row_number
             if self.integer_indexing:
                 header_cols = ['sequence_index', 'run number', 'run repeat']
                 header_strings = []
@@ -1499,8 +1524,6 @@ class DataFrameModel(QtCore.QObject):
                         header_strings.append('----')
                 vert_header_text += ' |'.join(header_strings)
             else:
-                filepath_item = self._model.item(row_number, self.COL_FILEPATH)
-                filepath = filepath_item.text()
                 basename = os.path.splitext(os.path.basename(filepath))[0]
                 vert_header_text += ' ' + basename
             vertical_header_item.setText(vert_header_text)
@@ -1514,7 +1537,7 @@ class DataFrameModel(QtCore.QObject):
 
         # Check for duplicates:
         for filepath in filepaths:
-            if filepath in self.dataframe['filepath'].values or filepath in to_add:
+            if filepath in self.row_number_by_filepath or filepath in to_add:
                 app.output_box.output('Warning: Ignoring duplicate shot %s\n' % filepath, red=True)
                 if new_row_data is not None:
                     df_row_index = np.where(new_row_data['filepath'].values == filepath)
@@ -1525,19 +1548,26 @@ class DataFrameModel(QtCore.QObject):
 
         assert len(new_row_data) == len(to_add)
 
+        if to_add:
+            # Update the dataframe:
+            self.dataframe = concat_with_padding(self.dataframe, new_row_data)
+            self.update_column_levels()
+
+        app.filebox.set_add_shots_progress(None, None, "updating filebox")
+
         for filepath in to_add:
-            # Add the new rows to the model:
+            # Add the new rows to the Qt model:
             self._model.appendRow(self.new_row(filepath))
             vert_header_item = QtGui.QStandardItem('...loading...')
             self._model.setVerticalHeaderItem(self._model.rowCount() - 1, vert_header_item)
             self._view.resizeRowToContents(self._model.rowCount() - 1)
 
-        if to_add:
-            self.dataframe = concat_with_padding(self.dataframe, new_row_data)
-            self.update_column_levels()
-            for filepath in to_add:
-                self.update_row(filepath, dataframe_already_updated=True)
-            self.renumber_rows()
+        self.renumber_rows(add_from=self._model.rowCount()-len(to_add))
+
+        # Update the Qt model:
+        for filepath in to_add:
+            self.update_row(filepath, dataframe_already_updated=True)
+            
 
     @inmain_decorator()
     def get_first_incomplete(self):
@@ -1589,7 +1619,7 @@ class FileBox(object):
         # A queue for storing incoming files from the ZMQ server so
         # the server can keep receiving files even if analysis is slow
         # or paused:
-        self.incoming_queue = Queue.Queue()
+        self.incoming_queue = queue.Queue()
 
         # Start the thread to handle incoming files, and store them in
         # a buffer if processing is paused:
@@ -1663,14 +1693,20 @@ class FileBox(object):
         self.shots_model.set_columns_visible(columns_visible)
 
     @inmain_decorator()
-    def set_add_shots_progress(self, completed, total):
-        if completed == total:
+    def set_add_shots_progress(self, completed, total, message):
+        self.ui.progressBar_add_shots.setFormat("Adding shots: [{}] %v/%m (%p%)".format(message))
+        if completed == total and message is None:
             self.ui.progressBar_add_shots.hide()
         else:
-            self.ui.progressBar_add_shots.setMaximum(total)
-            self.ui.progressBar_add_shots.setValue(completed)
+            if total is not None:
+                self.ui.progressBar_add_shots.setMaximum(total)
+            if completed is not None:
+                self.ui.progressBar_add_shots.setValue(completed)
             if self.ui.progressBar_add_shots.isHidden():
                 self.ui.progressBar_add_shots.show()
+        if completed is None and total is None and message is not None:
+            # Ensure a repaint when only the message changes:
+            self.ui.progressBar_add_shots.repaint()
 
     def incoming_buffer_loop(self):
         """We use a queue as a buffer for incoming shots. We don't want to hang and not
@@ -1694,19 +1730,21 @@ class FileBox(object):
                 if self.incoming_queue.qsize() == 0:
                     # Wait momentarily in case more arrive so we can batch process them:
                     time.sleep(0.1)
+                # Batch process to decrease number of dataframe concatenations:
+                batch_size = len(self.shots_model.dataframe) // 3 + 1 
                 while True:
                     try:
                         filepath = self.incoming_queue.get(False)
-                    except Queue.Empty:
+                    except queue.Empty:
                         break
                     else:
                         filepaths.append(filepath)
-                        if len(filepaths) >= 5:
+                        if len(filepaths) >= batch_size:
                             break
                 logger.info('adding:\n%s' % '\n'.join(filepaths))
                 if n_shots_added == 0:
                     total_shots = self.incoming_queue.qsize() + len(filepaths)
-                    self.set_add_shots_progress(1, total_shots)
+                    self.set_add_shots_progress(1, total_shots, "reading shot files")
 
                 # Remove duplicates from the list (preserving order) in case the
                 # client sent the same filepath multiple times:
@@ -1724,15 +1762,12 @@ class FileBox(object):
                     n_shots_added += 1
                     shots_remaining = self.incoming_queue.qsize()
                     total_shots = n_shots_added + shots_remaining + len(filepaths) - (i + 1)
-                    if i != len(filepaths) - 1:
-                        # Leave the last update until after dataframe concatenation.
-                        # Looks more responsive that way:
-                        self.set_add_shots_progress(n_shots_added, total_shots)
+                    self.set_add_shots_progress(n_shots_added, total_shots, "reading shot files")
+                self.set_add_shots_progress(n_shots_added, total_shots, "concatenating dataframes")
                 if dataframes:
                     new_row_data = concat_with_padding(*dataframes)
                 else:
                     new_row_data = None
-                self.set_add_shots_progress(n_shots_added, total_shots)
 
                 # Do not add the shots that were not found on disk. Reverse
                 # loop so that removing an item doesn't change the indices of
@@ -1744,6 +1779,7 @@ class FileBox(object):
                     # Let the analysis loop know to look for new shots:
                     self.analysis_pending.set()
                 if shots_remaining == 0:
+                    self.set_add_shots_progress(n_shots_added, total_shots, None)
                     n_shots_added = 0 # reset our counter for the next batch
                 
             except Exception:
@@ -1862,12 +1898,12 @@ class Lyse(object):
 
         # The singleshot routinebox will be connected to the filebox
         # by queues:
-        to_singleshot = Queue.Queue()
-        from_singleshot = Queue.Queue()
+        to_singleshot = queue.Queue()
+        from_singleshot = queue.Queue()
 
         # So will the multishot routinebox:
-        to_multishot = Queue.Queue()
-        from_multishot = Queue.Queue()
+        to_multishot = queue.Queue()
+        from_multishot = queue.Queue()
 
         self.output_box = OutputBox(self.ui.verticalLayout_output_box)
         self.singleshot_routinebox = RoutineBox(self.ui.verticalLayout_singleshot_routinebox, self.exp_config,
@@ -1993,10 +2029,14 @@ class Lyse(object):
         save_data = {}
 
         box = self.singleshot_routinebox
-        save_data['SingleShot'] = zip([routine.filepath for routine in box.routines], [box.model.item(row, box.COL_ACTIVE).checkState()  for row in range(box.model.rowCount())])
+        save_data['SingleShot'] = list(zip([routine.filepath for routine in box.routines],
+                                           [box.model.item(row, box.COL_ACTIVE).checkState() 
+                                            for row in range(box.model.rowCount())]))
         save_data['LastSingleShotFolder'] = box.last_opened_routine_folder
         box = self.multishot_routinebox
-        save_data['MultiShot'] = zip([routine.filepath for routine in box.routines], [box.model.item(row, box.COL_ACTIVE).checkState()  for row in range(box.model.rowCount())])
+        save_data['MultiShot'] = list(zip([routine.filepath for routine in box.routines],
+                                          [box.model.item(row, box.COL_ACTIVE).checkState() 
+                                           for row in range(box.model.rowCount())]))
         save_data['LastMultiShotFolder'] = box.last_opened_routine_folder
 
         save_data['LastFileBoxFolder'] = self.filebox.last_opened_shots_folder
