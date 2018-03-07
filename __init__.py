@@ -103,14 +103,14 @@ def globals_diff(run1, run2, group=None):
     return dict_diff(run1.get_globals(group), run2.get_globals(group))
  
 class Run(object):
-    def __init__(self, h5_path, no_write=False, cache=False):
+    def __init__(self, h5_path, no_write=False):
         self.no_write = no_write
         self.h5_path = h5_path
         if not self.no_write:
             with h5py.File(h5_path) as h5_file:
                 if not 'results' in h5_file:
                      h5_file.create_group('results')
-                     
+
         try:
             if not self.no_write:
                 # The group were this run's results will be stored in the h5 file
@@ -133,13 +133,6 @@ class Run(object):
             # 'mode, there is no scipt name. Opening in read only mode for '
             # 'the moment.\n')
             self.no_write = True
-
-        if cache:
-            try:
-                zmq_get(cache_port, 'localhost', ('set', ['runs', h5_path], self), cache_timeout)
-            except TimeoutError:
-                pass
-
 
     def set_group(self, groupname):
         self.group = groupname
@@ -394,24 +387,7 @@ class Sequence(Run):
             if not 'results' in h5_file:
                  h5_file.create_group('results')
 
-        if caching_enabled:
-            try:
-                cached_runs = zmq_get(cache_port, 'localhost', ('get', ['runs'], None), cache_timeout)
-            except TimeoutError:
-                cached_runs = None
-        else:
-            cached_runs = None
-
-        if cached_runs is not None:
-            too_many = set(cached_runs.keys()) - set(run_paths)
-            for filepath in too_many:
-                del cached_runs[filepath]
-            missing = set(run_paths) - set(cached_runs.keys())
-            for filepath in missing:
-                cached_runs[filepath] = Run(filepath, no_write=True, cache=caching_enabled)
-            self.runs = cached_runs
-        else:
-            self.runs = {path: Run(path, no_write=True, cache=caching_enabled) for path in run_paths}
+        self.runs = {path: Run(path, no_write=True) for path in run_paths}
 
         # The group were the results will be stored in the h5 file will
         # be the name of the python script which is instantiating this
